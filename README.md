@@ -1,8 +1,5 @@
 # SPLADE Classifier
-
-A fast, interpretable sparse text classifier with an sklearn-compatible API.
-
-Built on [SPLADE](https://arxiv.org/abs/2107.05720) (Sparse Lexical and Expansion Model), this library provides neural sparse representations that outperform traditional TF-IDF while remaining fully interpretable.
+A fast, interpretable sparse text classifier with an sklearn-compatible API. Built on [SPLADE](https://arxiv.org/abs/2107.05720) (Sparse Lexical and Expansion Model), this library provides neural sparse representations that outperform traditional TF-IDF while remaining fully interpretable.
 
 ## Features
 
@@ -27,47 +24,12 @@ predictions = clf.predict(test_texts)
 clf.print_explanation("This movie was fantastic!")
 ```
 
-Output:
-```
-SPLADE PREDICTION EXPLANATION
-============================================================
-Text: This movie was fantastic!
-
-Prediction: Positive
-Confidence: 97.23%
-
-Top Contributing Terms:
-----------------------------------------
-   1. fantastic       2.31 ██████████████████████████
-   2. movie           1.89 █████████████████████
-   3. great           1.76 ███████████████████
-```
-
-## Installation
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/splade-classifier.git
-cd splade-classifier
-
-# Install dependencies
-pip install torch transformers scikit-learn pandas tqdm scipy
-
-# Optional: Triton for GPU acceleration
-pip install triton
-```
-
 ## Benchmark Results
 
 | Model | Accuracy | F1 Score | Sparsity |
 |-------|----------|----------|----------|
 | **SPLADE (Ours)** | **82.0%** | **0.829** | 98.3% |
 | TF-IDF + LogReg | 78.5% | 0.805 | 95.2% |
-
-Run the benchmark:
-```bash
-python -m src.benchmark --data_dir Data --epochs 5
-```
 
 ## API Reference
 
@@ -118,26 +80,6 @@ The resulting vectors are:
 - **Interpretable**: Each dimension = vocabulary term weight
 - **Expandable**: Semantically related terms get non-zero weights
 
-## Project Structure
-
-```
-src/
-├── models/
-│   ├── sklearn_wrapper.py    # SPLADEClassifier (main API)
-│   ├── splade_distilbert.py  # DistilBERT backbone
-│   └── splade_mistral.py     # Mistral backbone (experimental)
-├── interpretability/
-│   ├── sparse_autoencoder.py # SAE for deep analysis
-│   ├── feature_analysis.py   # Feature statistics
-│   └── visualization.py      # Plotting utilities
-├── ops/
-│   ├── splade_kernels.py     # Triton-accelerated ops
-│   └── sae_kernels.py        # SAE Triton kernels
-├── train.py                  # Training script
-├── benchmark.py              # Comparison vs baselines
-└── analyze_sae.py            # SAE interpretability
-```
-
 ## Advanced: Sparse Autoencoder Analysis
 
 For deeper interpretability, train a Sparse Autoencoder on SPLADE vectors:
@@ -165,15 +107,4 @@ Triton kernels provide up to **10x speedup** on GPU inference:
 | Log Saturation | 0.66ms | 0.33ms | 2.0x |
 
 Triton is used automatically during inference when available.
-
-## Citation
-
-```bibtex
-@article{formal2021splade,
-  title={SPLADE: Sparse Lexical and Expansion Model for First Stage Ranking},
-  author={Formal, Thibault and Piwowarski, Benjamin and Clinchant, St{\'e}phane},
-  journal={SIGIR},
-  year={2021}
-}
-```
 
