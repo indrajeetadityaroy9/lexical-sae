@@ -8,6 +8,7 @@ __pycache__/
 venv/
 ENV/
 env/
+.env
 
 # Test/coverage caches
 .pytest_cache/
@@ -19,18 +20,35 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# Model artifacts
+# Model artifacts and checkpoints
 models/
 models_test/
 models_improved/
+checkpoints/
+outputs/
 *.pth
+*.pt
+*.bin
+*.ckpt
+*.safetensors
 
-# Data
+# Data and datasets
 Data/
 data/
+datasets/
+*.csv
+*.json
+*.jsonl
+*.parquet
+*.arrow
 
-# Logs
+# Logs and experiment tracking
 *.log
+logs/
+wandb/
+mlruns/
+tensorboard/
+.cache/
 
 # Editor/OS
 .vscode/

@@ -3,16 +3,32 @@ import torch.nn as nn
 import torch.optim as optim
 import argparse
 import os
-from src.neural_vectorizer import SparseClassifier
-from src.data_loader import get_data_loaders
+import random
+import numpy as np
+from src.models import DistilBERTSparseClassifier
+from src.data import get_data_loaders
 from src.regularizers import flops_regularization
 from src.evaluation import evaluate
-from src.config import (
-    DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LR
-)
 import time
 
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
 def train(args):
+    # Set seed for reproducibility
+    if args.seed is not None:
+        set_seed(args.seed)
+        print(f"Random seed set to {args.seed}")
+
     # 1. Load Data
     print(f"Loading data from {args.data_dir}...")
     train_loader, test_loader = get_data_loaders(
@@ -22,8 +38,7 @@ def train(args):
     )
 
     # 2. Init Model
-    # Note: Vocab size is handled internally by the Transformer tokenizer
-    model = SparseClassifier()
+    model = DistilBERTSparseClassifier()
     
     # Check for GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -84,10 +99,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, default='Data', help='Directory containing train/test files')
     parser.add_argument('--output_dir', type=str, default='models', help='Directory to save models')
-    parser.add_argument('--batch_size', type=int, default=DEFAULT_BATCH_SIZE)
-    parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--lr', type=float, default=2e-5, help="Learning rate (default: 2e-5 for Transformers)")
     parser.add_argument('--flops_lambda', type=float, default=1e-4, help='Regularization strength for FLOPS sparsity')
-    
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+
     args = parser.parse_args()
     train(args)
