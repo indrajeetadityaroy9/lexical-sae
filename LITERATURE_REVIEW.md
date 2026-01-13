@@ -1,10 +1,4 @@
-# Targeted Literature Review: Neural Sparse Representations (2022–2025)
-
-## Executive Summary
-This review analyzes recent literature (2022–2025) to address specific gaps identified in the "Neural Vectorizer" project: **interpretability**, **inference latency**, **sparsity efficiency**, and **theoretical grounding**. The field has moved beyond simple L1 regularization toward sophisticated "Sparse Lexical" models (like SPLADE) that combine the interpretability of TF-IDF with the semantic power of Transformers.
-
-## 1. Principled Frameworks for Learned Sparsity
-The primary gap in the current project is the reliance on a simple linear layer + L1 penalty. Recent work offers more robust frameworks.
+# Neural Sparse Representations (2022–2025)
 
 ### The SPLADE Family (Sparse Lexical and Expansion Models)
 *   **SPLADE v2 (Formal et al., 2021-2022):** Introduces a framework where a BERT model predicts weights for the *entire* vocabulary (30k+ tokens) for each input text. It uses a **Log-Saturation** activation (similar to the project's `torch.log1p`) and **FLOPS-regularized** sparsity.
@@ -20,8 +14,6 @@ The primary gap in the current project is the reliance on a simple linear layer 
     *   *Key Insight:* This allows "Late Interaction" models (like ColBERT) to be indexed by standard inverted indexes (Lucene/Elasticsearch), bridging the gap between high-performance neural matching and low-latency keyword search.
 
 ## 2. Theoretical Guarantees & Foundations
-The current project lacks a theoretical link between its neural weights and statistical properties.
-
 *   **Transformers as n-gram Models (Svete & Cotterell, Apr 2024):**
     *   *Finding:* Proves that Transformers with hard or sparse attention can **exactly represent** any n-gram language model.
     *   *Implication:* This provides a theoretical "existence proof" that the project's Neural Vectorizer *can* strictly subsume the baseline TF-IDF/n-gram model given the right sparsity pattern.
@@ -30,7 +22,6 @@ The current project lacks a theoretical link between its neural weights and stat
     *   Derives compression-based generalization bounds for large models, suggesting that **highly sparse** (compressible) models should generalize better to unseen data, validating the project's hypothesis that sparsity aids robustness.
 
 ## 3. Scaling & Hardware Efficiency
-The project's benchmark showed a massive latency gap (92ms Neural vs 0.07ms Sklearn).
 
 *   **Massive Scale Analysis (Bruch et al., Jan 2025):**
     *   *Study:* "Investigating the Scalability of Approximate Sparse Retrieval Algorithms to Massive Datasets" (138M documents).
@@ -43,9 +34,3 @@ The project's benchmark showed a massive latency gap (92ms Neural vs 0.07ms Skle
 
 *   **Rethinking Sparse Optimization (Kuznedelev et al., Aug 2023):**
     *   *Finding:* Standard training recipes (AdamW, constant pruning) lead to under-trained sparse models. They propose modified schedules specifically for high-sparsity regimes.
-
-## 4. Recommendations for Next Steps
-
-1.  **Adopt "Term Expansion":** Modify the `NeuralVectorizer` to output a vector over the *entire* vocabulary, not just the input tokens. This moves from "Neural Weighting" to "Neural Expansion" (SPLADE-style).
-2.  **Hardware-Aware Sparsity:** Shift from generic `block_l1_loss` to **Channel-wise Sparsity** or **N:M Sparsity** (supported by NVIDIA Ampere GPUs) to actually realize the promised latency gains.
-3.  **Inverted Index Integration:** To beat the Sklearn baseline's 0.07ms, the Neural Vectorizer must not just output a vector but be coupled with a sparse matrix search (like `scipy.sparse` or Lucene) during inference.
