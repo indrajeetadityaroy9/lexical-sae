@@ -1,3 +1,10 @@
+Metadata-Version: 2.4
+Name: splade-classifier
+Version: 0.1.0
+Summary: SPLADE neural sparse text classifier with sklearn-compatible API
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
 # SPLADE Classifier
 A fast, interpretable sparse text classifier with an sklearn-compatible API. Built on [SPLADE](https://arxiv.org/abs/2107.05720) (Sparse Lexical and Expansion Model), this library provides neural sparse representations that outperform traditional TF-IDF while remaining fully interpretable.
 
@@ -6,7 +13,7 @@ A fast, interpretable sparse text classifier with an sklearn-compatible API. Bui
 - **Sklearn-compatible API** - `fit()`, `predict()`, `transform()` just like scikit-learn
 - **Interpretable** - See exactly which terms drive each prediction
 - **Sparse & Fast** - 98%+ sparsity with Triton-accelerated inference (10x speedup)
-- **State-of-the-art** - Outperforms TF-IDF baselines by 5+ percentage points
+- **State-of-the-art** - Outperforms TF-IDF baselines by 3-4 percentage points
 
 ## Quick Start
 
@@ -26,16 +33,10 @@ clf.print_explanation("This movie was fantastic!")
 
 ## Benchmark Results
 
-Evaluated on AG News (4-class news classification) with 2,000 training samples:
-
-| Model | Accuracy | F1 Score | Sparsity | Train Time |
-|-------|----------|----------|----------|------------|
-| **SPLADE (Ours)** | **90.1%** | **0.901** | 78.1% | 13.5s |
-| TF-IDF + LogReg | 85.0% | 0.848 | 99.7% | 4.9s |
-
-**+5.1% accuracy improvement** over traditional TF-IDF baseline.
-
-See `notebooks/splade_sklearn_benchmark.ipynb` for the full comparison.
+| Model | Accuracy | F1 Score | Sparsity |
+|-------|----------|----------|----------|
+| **SPLADE (Ours)** | **82.0%** | **0.829** | 98.3% |
+| TF-IDF + LogReg | 78.5% | 0.805 | 95.2% |
 
 ## API Reference
 
@@ -105,12 +106,12 @@ This decomposes polysemantic SPLADE dimensions into monosemantic features.
 
 ## Performance Optimization
 
-Triton kernels provide significant speedup on GPU inference:
+Triton kernels provide up to **10x speedup** on GPU inference:
 
 | Operation | PyTorch | Triton | Speedup |
 |-----------|---------|--------|---------|
 | SPLADE Aggregation | 1.29ms | 0.12ms | **10.5x** |
-| TopK Activation (SAE) | 0.45ms | 0.15ms | **3x** |
+| Log Saturation | 0.66ms | 0.33ms | 2.0x |
 
-Triton is used automatically during inference when available (requires CUDA).
+Triton is used automatically during inference when available.
 

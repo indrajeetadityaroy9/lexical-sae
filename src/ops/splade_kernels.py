@@ -2,8 +2,8 @@
 Triton kernels for SPLADE operations.
 
 Provides fused implementations of:
-- Log-saturation activation: log(1 + ReLU(x))
 - Masked SPLADE aggregation: log1p(relu(x)) * mask + max_pool
+- FLOPS regularization for sparsity
 
 These kernels minimize memory bandwidth by fusing multiple operations
 that would otherwise require separate kernel launches and intermediate
@@ -16,146 +16,88 @@ Hardware Assumptions:
 """
 
 import torch
-import triton
-import triton.language as tl
-from typing import Optional, Tuple
+from typing import Optional
 
-
-# =============================================================================
-# Fused Log-Saturation Kernel: log(1 + ReLU(x))
-# =============================================================================
-
-@triton.jit
-def _log_saturation_kernel(
-    input_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """
-    Fused log(1 + ReLU(x)) activation.
-
-    Replaces two kernel launches (relu + log1p) with one.
-    Memory reads: 1x, Memory writes: 1x (vs 2x reads, 2x writes unfused)
-    """
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    # Load input
-    x = tl.load(input_ptr + offsets, mask=mask, other=0.0)
-
-    # Fused computation: log(1 + max(0, x))
-    # ReLU
-    x_relu = tl.maximum(x, 0.0)
-    # log1p = log(1 + x)
-    result = tl.log(1.0 + x_relu)
-
-    # Store output
-    tl.store(output_ptr + offsets, result, mask=mask)
-
-
-def log_saturation_triton(x: torch.Tensor) -> torch.Tensor:
-    """
-    Triton implementation of log(1 + ReLU(x)).
-
-    Args:
-        x: Input tensor of any shape
-
-    Returns:
-        Output tensor with same shape
-
-    Shape Assumptions:
-        - Input must be contiguous
-        - Total elements must fit in GPU memory
-    """
-    assert x.is_cuda, "Input must be on CUDA device"
-    assert x.is_contiguous(), "Input must be contiguous"
-
-    output = torch.empty_like(x)
-    n_elements = x.numel()
-
-    # Tune block size based on tensor size
-    BLOCK_SIZE = 1024
-    grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
-
-    _log_saturation_kernel[grid](
-        x, output, n_elements,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
-
-    return output
+# Triton availability check
+try:
+    import triton
+    import triton.language as tl
+    _TRITON_AVAILABLE = True
+except ImportError:
+    _TRITON_AVAILABLE = False
+    triton = None
+    tl = None
 
 
 # =============================================================================
 # Fused Masked SPLADE Aggregation: log1p(relu(x)) * mask -> max_pool
 # =============================================================================
 
-@triton.jit
-def _splade_aggregate_kernel(
-    logits_ptr,           # [batch, seq_len, vocab_size]
-    mask_ptr,             # [batch, seq_len]
-    output_ptr,           # [batch, vocab_size]
-    batch_size,
-    seq_len,
-    vocab_size,
-    logits_batch_stride,
-    logits_seq_stride,
-    mask_batch_stride,
-    output_batch_stride,
-    BLOCK_SIZE_V: tl.constexpr,  # Block over vocab dimension
-):
-    """
-    Fused SPLADE aggregation kernel.
+if _TRITON_AVAILABLE:
+    @triton.jit
+    def _splade_aggregate_kernel(
+        logits_ptr,           # [batch, seq_len, vocab_size]
+        mask_ptr,             # [batch, seq_len]
+        output_ptr,           # [batch, vocab_size]
+        batch_size,
+        seq_len,
+        vocab_size,
+        logits_batch_stride,
+        logits_seq_stride,
+        mask_batch_stride,
+        output_batch_stride,
+        BLOCK_SIZE_V: tl.constexpr,  # Block over vocab dimension
+    ):
+        """
+        Fused SPLADE aggregation kernel.
 
-    For each (batch, vocab) position:
-    1. Load all seq_len logits
-    2. Apply log1p(relu(x)) to each
-    3. Apply attention mask
-    4. Compute max over sequence
-    5. Store result
+        For each (batch, vocab) position:
+        1. Load all seq_len logits
+        2. Apply log1p(relu(x)) to each
+        3. Apply attention mask
+        4. Compute max over sequence
+        5. Store result
 
-    This fuses 4 operations into 1 kernel, reducing memory traffic by ~4x.
-    """
-    # 2D grid: (batch, vocab_blocks)
-    batch_idx = tl.program_id(0)
-    vocab_block_idx = tl.program_id(1)
+        This fuses 4 operations into 1 kernel, reducing memory traffic by ~4x.
+        """
+        # 2D grid: (batch, vocab_blocks)
+        batch_idx = tl.program_id(0)
+        vocab_block_idx = tl.program_id(1)
 
-    # Vocab offsets for this block
-    vocab_offsets = vocab_block_idx * BLOCK_SIZE_V + tl.arange(0, BLOCK_SIZE_V)
-    vocab_mask = vocab_offsets < vocab_size
+        # Vocab offsets for this block
+        vocab_offsets = vocab_block_idx * BLOCK_SIZE_V + tl.arange(0, BLOCK_SIZE_V)
+        vocab_mask = vocab_offsets < vocab_size
 
-    # Initialize max values to -inf
-    max_vals = tl.zeros([BLOCK_SIZE_V], dtype=tl.float32) - float('inf')
+        # Initialize max values to -inf
+        max_vals = tl.zeros([BLOCK_SIZE_V], dtype=tl.float32) - float('inf')
 
-    # Iterate over sequence positions
-    for seq_idx in range(seq_len):
-        # Load attention mask for this position
-        mask_offset = batch_idx * mask_batch_stride + seq_idx
-        attn_mask = tl.load(mask_ptr + mask_offset)
+        # Iterate over sequence positions
+        for seq_idx in range(seq_len):
+            # Load attention mask for this position
+            mask_offset = batch_idx * mask_batch_stride + seq_idx
+            attn_mask = tl.load(mask_ptr + mask_offset)
 
-        # Skip if masked out (attention_mask == 0)
-        if attn_mask > 0:
-            # Load logits for this (batch, seq, vocab_block)
-            logits_offset = (batch_idx * logits_batch_stride +
-                           seq_idx * logits_seq_stride +
-                           vocab_offsets)
-            logits = tl.load(logits_ptr + logits_offset, mask=vocab_mask, other=0.0)
+            # Skip if masked out (attention_mask == 0)
+            if attn_mask > 0:
+                # Load logits for this (batch, seq, vocab_block)
+                logits_offset = (batch_idx * logits_batch_stride +
+                               seq_idx * logits_seq_stride +
+                               vocab_offsets)
+                logits = tl.load(logits_ptr + logits_offset, mask=vocab_mask, other=0.0)
 
-            # Fused log1p(relu(logits))
-            logits_relu = tl.maximum(logits, 0.0)
-            weights = tl.log(1.0 + logits_relu)
+                # Fused log1p(relu(logits))
+                logits_relu = tl.maximum(logits, 0.0)
+                weights = tl.log(1.0 + logits_relu)
 
-            # Update max (masked positions contribute 0, which won't affect max)
-            max_vals = tl.maximum(max_vals, weights)
+                # Update max (masked positions contribute 0, which won't affect max)
+                max_vals = tl.maximum(max_vals, weights)
 
-    # Handle case where all positions were masked (set to 0 instead of -inf)
-    max_vals = tl.where(max_vals == -float('inf'), 0.0, max_vals)
+        # Handle case where all positions were masked (set to 0 instead of -inf)
+        max_vals = tl.where(max_vals == -float('inf'), 0.0, max_vals)
 
-    # Store output
-    output_offset = batch_idx * output_batch_stride + vocab_offsets
-    tl.store(output_ptr + output_offset, max_vals, mask=vocab_mask)
+        # Store output
+        output_offset = batch_idx * output_batch_stride + vocab_offsets
+        tl.store(output_ptr + output_offset, max_vals, mask=vocab_mask)
 
 
 def splade_aggregate_triton(
@@ -177,12 +119,9 @@ def splade_aggregate_triton(
 
     Returns:
         doc_vector: Sparse document vectors [batch_size, vocab_size]
-
-    Shape Assumptions:
-        - logits: 3D tensor, contiguous, float32
-        - attention_mask: 2D tensor, contiguous
-        - batch_size * vocab_size fits in GPU memory
     """
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("Triton is not available. Install with: pip install triton")
     assert logits.is_cuda and attention_mask.is_cuda, "Inputs must be on CUDA"
     assert logits.dim() == 3, f"Expected 3D logits, got {logits.dim()}D"
     assert attention_mask.dim() == 2, f"Expected 2D mask, got {attention_mask.dim()}D"
@@ -221,51 +160,52 @@ def splade_aggregate_triton(
 # Optimized FLOPS Regularization
 # =============================================================================
 
-@triton.jit
-def _flops_reg_kernel(
-    input_ptr,           # [batch_size, vocab_size]
-    output_ptr,          # [1] scalar output
-    partial_sums_ptr,    # [num_vocab_blocks] partial results
-    batch_size,
-    vocab_size,
-    input_batch_stride,
-    BLOCK_SIZE_V: tl.constexpr,
-    BLOCK_SIZE_B: tl.constexpr,
-):
-    """
-    FLOPS regularization: sum_j (mean_i(|w_ij|))^2
+if _TRITON_AVAILABLE:
+    @triton.jit
+    def _flops_reg_kernel(
+        input_ptr,           # [batch_size, vocab_size]
+        output_ptr,          # [1] scalar output
+        partial_sums_ptr,    # [num_vocab_blocks] partial results
+        batch_size,
+        vocab_size,
+        input_batch_stride,
+        BLOCK_SIZE_V: tl.constexpr,
+        BLOCK_SIZE_B: tl.constexpr,
+    ):
+        """
+        FLOPS regularization: sum_j (mean_i(|w_ij|))^2
 
-    Computes partial sums per vocab block, to be reduced in a second pass.
-    """
-    vocab_block_idx = tl.program_id(0)
-    vocab_start = vocab_block_idx * BLOCK_SIZE_V
-    vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE_V)
-    vocab_mask = vocab_offsets < vocab_size
+        Computes partial sums per vocab block, to be reduced in a second pass.
+        """
+        vocab_block_idx = tl.program_id(0)
+        vocab_start = vocab_block_idx * BLOCK_SIZE_V
+        vocab_offsets = vocab_start + tl.arange(0, BLOCK_SIZE_V)
+        vocab_mask = vocab_offsets < vocab_size
 
-    # Accumulate sum of abs values for this vocab block
-    sums = tl.zeros([BLOCK_SIZE_V], dtype=tl.float32)
+        # Accumulate sum of abs values for this vocab block
+        sums = tl.zeros([BLOCK_SIZE_V], dtype=tl.float32)
 
-    # Process batch in blocks
-    for batch_start in range(0, batch_size, BLOCK_SIZE_B):
-        batch_offsets = batch_start + tl.arange(0, BLOCK_SIZE_B)
-        batch_mask = batch_offsets < batch_size
+        # Process batch in blocks
+        for batch_start in range(0, batch_size, BLOCK_SIZE_B):
+            batch_offsets = batch_start + tl.arange(0, BLOCK_SIZE_B)
+            batch_mask = batch_offsets < batch_size
 
-        # Load block [BLOCK_SIZE_B, BLOCK_SIZE_V]
-        for i in range(BLOCK_SIZE_B):
-            if batch_start + i < batch_size:
-                offset = (batch_start + i) * input_batch_stride + vocab_offsets
-                vals = tl.load(input_ptr + offset, mask=vocab_mask, other=0.0)
-                sums += tl.abs(vals)
+            # Load block [BLOCK_SIZE_B, BLOCK_SIZE_V]
+            for i in range(BLOCK_SIZE_B):
+                if batch_start + i < batch_size:
+                    offset = (batch_start + i) * input_batch_stride + vocab_offsets
+                    vals = tl.load(input_ptr + offset, mask=vocab_mask, other=0.0)
+                    sums += tl.abs(vals)
 
-    # Compute mean and square
-    means = sums / batch_size
-    squared = means * means
+        # Compute mean and square
+        means = sums / batch_size
+        squared = means * means
 
-    # Sum squared means for this block
-    block_sum = tl.sum(squared)
+        # Sum squared means for this block
+        block_sum = tl.sum(squared)
 
-    # Store partial sum
-    tl.store(partial_sums_ptr + vocab_block_idx, block_sum)
+        # Store partial sum
+        tl.store(partial_sums_ptr + vocab_block_idx, block_sum)
 
 
 def flops_regularization_triton(activations: torch.Tensor) -> torch.Tensor:
@@ -280,6 +220,8 @@ def flops_regularization_triton(activations: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar loss tensor
     """
+    if not _TRITON_AVAILABLE:
+        raise RuntimeError("Triton is not available. Install with: pip install triton")
     assert activations.is_cuda, "Input must be on CUDA"
     assert activations.dim() == 2, f"Expected 2D tensor, got {activations.dim()}D"
     assert activations.is_contiguous(), "Input must be contiguous"
@@ -311,13 +253,8 @@ def flops_regularization_triton(activations: torch.Tensor) -> torch.Tensor:
 
 
 # =============================================================================
-# Reference PyTorch Implementations (for fallback and testing)
+# Reference PyTorch Implementations (for fallback)
 # =============================================================================
-
-def log_saturation_pytorch(x: torch.Tensor) -> torch.Tensor:
-    """Reference PyTorch implementation of log(1 + ReLU(x))."""
-    return torch.log1p(torch.relu(x))
-
 
 def splade_aggregate_pytorch(
     logits: torch.Tensor,
@@ -341,29 +278,6 @@ def flops_regularization_pytorch(activations: torch.Tensor) -> torch.Tensor:
 # =============================================================================
 # Unified Interface with Automatic Fallback
 # =============================================================================
-
-_TRITON_AVAILABLE = True
-
-
-def log_saturation(x: torch.Tensor, use_triton: Optional[bool] = None) -> torch.Tensor:
-    """
-    Log-saturation activation with automatic backend selection.
-
-    Args:
-        x: Input tensor
-        use_triton: Force Triton (True), PyTorch (False), or auto (None)
-
-    Returns:
-        log(1 + ReLU(x))
-    """
-    if use_triton is None:
-        use_triton = _TRITON_AVAILABLE and x.is_cuda and x.is_contiguous()
-
-    if use_triton:
-        return log_saturation_triton(x)
-    else:
-        return log_saturation_pytorch(x)
-
 
 def splade_aggregate(
     logits: torch.Tensor,

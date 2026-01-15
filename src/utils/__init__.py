@@ -4,7 +4,8 @@ Utility functions for the SPLADE project.
 Provides common utilities for:
 - Reproducibility (seed setting)
 - Text processing (tokenization, stopwords)
-- File I/O
+- Device management
+- Data source validation
 """
 
 import random
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 
 from .text import load_stopwords, simple_tokenizer
+from .common import get_device, validate_data_sources
 
 
 def set_seed(seed: int = 42):
@@ -30,36 +32,12 @@ def set_seed(seed: int = 42):
         torch.backends.cudnn.benchmark = False
 
 
-def get_device() -> torch.device:
-    """Get the best available device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    else:
-        return torch.device("cpu")
-
-
-def count_parameters(model: torch.nn.Module) -> int:
-    """Count trainable parameters in a model."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def format_size(num_bytes: int) -> str:
-    """Format byte size as human-readable string."""
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if abs(num_bytes) < 1024.0:
-            return f"{num_bytes:.2f} {unit}"
-        num_bytes /= 1024.0
-    return f"{num_bytes:.2f} PB"
-
-
 __all__ = [
     "set_seed",
-    "get_device",
-    "count_parameters",
-    "format_size",
     # Text processing
     "load_stopwords",
     "simple_tokenizer",
+    # Common utilities
+    "get_device",
+    "validate_data_sources",
 ]

@@ -1,7 +1,15 @@
 """
 Benchmark comparing sklearn TF-IDF vs Neural SPLADE classifier.
 
-Both implementations now use the same sklearn-compatible API:
+Supports two data sources:
+    Option A - Local files:
+        python -m src.benchmark --train_path data/train.csv --test_path data/test.csv
+
+    Option B - HuggingFace datasets:
+        python -m src.benchmark --dataset imdb --epochs 3
+        python -m src.benchmark --dataset ag_news --epochs 3
+
+Both implementations use sklearn-compatible APIs:
 
     # Sklearn
     vectorizer = TfidfVectorizer()
@@ -18,23 +26,18 @@ Both implementations now use the same sklearn-compatible API:
 import time
 import argparse
 import os
-import numpy as np
+
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 
 from src.models import SPLADEClassifier
-from src.utils import load_stopwords, simple_tokenizer
+from src.data import load_classification_data
+from src.utils import load_stopwords, simple_tokenizer, validate_data_sources
 
 
-def load_data(file_path):
-    """Load text data from TSV file."""
-    df = pd.read_csv(file_path, sep='\t', header=None, names=['id', 'review', 'label'])
-    return df['review'].tolist(), df['label'].values
-
-
-def train_sklearn_baseline(train_texts, train_labels, test_texts, test_labels):
+def train_sklearn_baseline(train_texts, train_labels, test_texts, test_labels, num_classes=2):
     """Train and evaluate sklearn TF-IDF + Logistic Regression baseline."""
     print("\n" + "="*60)
     print("SKLEARN TF-IDF BASELINE")
@@ -45,13 +48,16 @@ def train_sklearn_baseline(train_texts, train_labels, test_texts, test_labels):
     # 1. Vectorize
     stopwords = load_stopwords()
     tokenizer_func = lambda text: simple_tokenizer(text, stopwords)
-    vectorizer = TfidfVectorizer(max_features=1000, tokenizer=tokenizer_func, token_pattern=None)
+    vectorizer = TfidfVectorizer(max_features=5000, tokenizer=tokenizer_func, token_pattern=None)
 
     X_train = vectorizer.fit_transform(train_texts)
     X_test = vectorizer.transform(test_texts)
 
     # 2. Train Classifier
-    clf = LogisticRegression()
+    if num_classes > 2:
+        clf = LogisticRegression(max_iter=1000, multi_class='multinomial')
+    else:
+        clf = LogisticRegression(max_iter=1000)
     clf.fit(X_train, train_labels)
 
     train_time = time.time() - start_time
@@ -62,7 +68,10 @@ def train_sklearn_baseline(train_texts, train_labels, test_texts, test_labels):
     inf_time = time.time() - start_inf
 
     acc = accuracy_score(test_labels, preds)
-    f1 = f1_score(test_labels, preds)
+    if num_classes > 2:
+        f1 = f1_score(test_labels, preds, average='macro')
+    else:
+        f1 = f1_score(test_labels, preds)
     sparsity = 100.0 * (1.0 - X_test.nnz / (X_test.shape[0] * X_test.shape[1]))
 
     print(f"Accuracy:  {acc:.4f}")
@@ -81,7 +90,10 @@ def train_sklearn_baseline(train_texts, train_labels, test_texts, test_labels):
     }
 
 
-def train_splade_classifier(train_texts, train_labels, test_texts, test_labels, epochs=5, model_path=None):
+def train_splade_classifier(
+    train_texts, train_labels, test_texts, test_labels,
+    num_labels=1, class_names=None, epochs=5, model_path=None
+):
     """Train and evaluate Neural SPLADE classifier."""
     print("\n" + "="*60)
     print("NEURAL SPLADE CLASSIFIER")
@@ -89,6 +101,8 @@ def train_splade_classifier(train_texts, train_labels, test_texts, test_labels, 
 
     # Create classifier with sklearn-like API
     clf = SPLADEClassifier(
+        num_labels=num_labels,
+        class_names=class_names,
         batch_size=16,
         learning_rate=2e-5,
         flops_lambda=1e-4,
@@ -117,7 +131,10 @@ def train_splade_classifier(train_texts, train_labels, test_texts, test_labels, 
     inf_time = time.time() - start_inf
 
     acc = accuracy_score(test_labels, preds)
-    f1 = f1_score(test_labels, preds)
+    if num_labels > 1:
+        f1 = f1_score(test_labels, preds, average='macro')
+    else:
+        f1 = f1_score(test_labels, preds)
     sparsity = clf.get_sparsity(test_texts)
 
     print(f"Accuracy:  {acc:.4f}")
@@ -135,24 +152,93 @@ def train_splade_classifier(train_texts, train_labels, test_texts, test_labels, 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark sklearn vs SPLADE")
-    parser.add_argument('--data_dir', type=str, default='Data')
+    parser = argparse.ArgumentParser(
+        description="Benchmark sklearn TF-IDF vs Neural SPLADE classifier",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Benchmark on local CSV/TSV files
+  python -m src.benchmark --train_path data/train.csv --test_path data/test.csv
+
+  # Benchmark on HuggingFace dataset
+  python -m src.benchmark --dataset imdb --epochs 3
+  python -m src.benchmark --dataset ag_news --epochs 3
+
+  # Quick benchmark with limited samples
+  python -m src.benchmark --dataset yelp_polarity --max_samples 5000 --epochs 2
+        """
+    )
+
+    # Data source options
+    data_group = parser.add_argument_group('Data Source (choose one)')
+    data_group.add_argument('--train_path', type=str, default=None,
+                           help='Path to training CSV/TSV file')
+    data_group.add_argument('--test_path', type=str, default=None,
+                           help='Path to test CSV/TSV file')
+    data_group.add_argument('--dataset', type=str, default=None,
+                           help='HuggingFace dataset name (e.g., imdb, ag_news)')
+
+    # Options
+    parser.add_argument('--max_samples', type=int, default=None,
+                       help='Limit samples per split')
     parser.add_argument('--model_path', type=str, default=None,
-                        help='Path to save/load SPLADE model')
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--skip_sklearn', action='store_true')
-    parser.add_argument('--skip_splade', action='store_true')
+                       help='Path to save/load SPLADE model')
+    parser.add_argument('--epochs', type=int, default=5,
+                       help='Training epochs for SPLADE')
+    parser.add_argument('--skip_sklearn', action='store_true',
+                       help='Skip sklearn baseline')
+    parser.add_argument('--skip_splade', action='store_true',
+                       help='Skip SPLADE classifier')
+
     args = parser.parse_args()
 
+    # Validate inputs
+    has_local, has_hf = validate_data_sources(
+        args.train_path, args.test_path, args.dataset,
+        raise_on_error=False, print_error=True
+    )
+    if not has_local and not has_hf:
+        return
+
     # Load data
-    train_path = os.path.join(args.data_dir, 'movie_reviews_train.txt')
-    test_path = os.path.join(args.data_dir, 'movie_reviews_test.txt')
+    print("Loading data...")
+    if has_local:
+        print(f"  Source: Local files")
+        print(f"  Train: {args.train_path}")
+        print(f"  Test: {args.test_path}")
+        train_texts, train_labels, train_meta = load_classification_data(
+            file_path=args.train_path,
+            max_samples=args.max_samples,
+        )
+        test_texts, test_labels, test_meta = load_classification_data(
+            file_path=args.test_path,
+            max_samples=args.max_samples,
+        )
+        num_classes = max(train_meta['num_labels'], test_meta['num_labels'])
+        class_names = None
+    else:
+        print(f"  Source: HuggingFace dataset '{args.dataset}'")
+        train_texts, train_labels, train_meta = load_classification_data(
+            dataset=args.dataset,
+            split="train",
+            max_samples=args.max_samples,
+        )
+        test_texts, test_labels, test_meta = load_classification_data(
+            dataset=args.dataset,
+            split="test",
+            max_samples=args.max_samples,
+        )
+        num_classes = train_meta['num_labels']
+        class_names = train_meta.get('class_names')
 
-    train_texts, train_labels = load_data(train_path)
-    test_texts, test_labels = load_data(test_path)
+    # For SPLADE: use num_labels=1 for binary (BCE), num_labels=N for multi-class
+    num_labels = 1 if num_classes == 2 else num_classes
 
-    print(f"Train samples: {len(train_texts)}")
-    print(f"Test samples:  {len(test_texts)}")
+    print(f"  Train samples: {len(train_texts)}")
+    print(f"  Test samples: {len(test_texts)}")
+    print(f"  Num classes: {num_classes}")
+    if class_names:
+        print(f"  Classes: {class_names}")
 
     results = []
 
@@ -160,7 +246,8 @@ def main():
     if not args.skip_sklearn:
         results.append(train_sklearn_baseline(
             train_texts, train_labels,
-            test_texts, test_labels
+            test_texts, test_labels,
+            num_classes=num_classes
         ))
 
     # Run SPLADE
@@ -168,6 +255,8 @@ def main():
         results.append(train_splade_classifier(
             train_texts, train_labels,
             test_texts, test_labels,
+            num_labels=num_labels,
+            class_names=class_names,
             epochs=args.epochs,
             model_path=args.model_path
         ))

@@ -9,13 +9,14 @@ Usage:
     python -m src.analyze_sae --sae_path outputs/sae/sae_best.pt --vectors_path outputs/vectors.pt
 """
 
-import torch
 import argparse
 import os
+
+import torch
 from transformers import AutoTokenizer
-from collections import defaultdict
 
 from src.interpretability.sparse_autoencoder import SparseAutoencoder
+from src.utils import get_device
 
 
 def load_sae(sae_path: str, device: torch.device) -> SparseAutoencoder:
@@ -237,7 +238,7 @@ def generate_report(
 
 
 def main(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     print(f"Using device: {device}")
 
     # Load tokenizer

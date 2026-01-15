@@ -8,14 +8,14 @@ Usage:
     python -m src.train_sae --vectors_path outputs/vectors.pt --output_dir outputs/sae
 """
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import argparse
 import os
-from tqdm import tqdm
+
+import torch
+import torch.optim as optim
 
 from src.interpretability.sparse_autoencoder import SparseAutoencoder
+from src.utils import get_device
 
 
 def train_sae(
@@ -41,7 +41,7 @@ def train_sae(
         batch_size: Training batch size
         lr: Learning rate
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     print(f"Using device: {device}")
 
     # Load vectors

@@ -18,23 +18,16 @@ Reference:
     https://arxiv.org/abs/2309.08600
 """
 
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Optional, List
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
-from tqdm import tqdm
 
-# Import optimized ops with fallback
-try:
-    from src.ops import topk_activation, TRITON_AVAILABLE
-    USE_TRITON_OPS = TRITON_AVAILABLE
-except ImportError:
-    USE_TRITON_OPS = False
-    topk_activation = None
+# Import optimized ops (no fallback - src.ops must be available)
+from src.ops import topk_activation, TRITON_AVAILABLE
+USE_TRITON_OPS = TRITON_AVAILABLE
 
 
 @dataclass
@@ -283,189 +276,6 @@ class SparseAutoencoder(nn.Module):
             results.append((token, actual_weight))
 
         return results
-
-
-class SAETrainer:
-    """
-    Trainer for Sparse Autoencoder.
-
-    Handles the training loop, logging, and checkpointing
-    for SAE training on pre-computed SPLADE vectors.
-    """
-
-    def __init__(
-        self,
-        sae: SparseAutoencoder,
-        learning_rate: float = 1e-4,
-        weight_decay: float = 0.0,
-        device: Optional[torch.device] = None
-    ):
-        self.sae = sae
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.sae.to(self.device)
-
-        self.optimizer = torch.optim.AdamW(
-            sae.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-
-        self.history: List[Dict[str, float]] = []
-
-    def train_epoch(
-        self,
-        dataloader: DataLoader,
-        epoch: int = 0
-    ) -> Dict[str, float]:
-        """Train for one epoch."""
-        self.sae.train()
-
-        total_loss = 0.0
-        total_recon_loss = 0.0
-        total_sparsity_loss = 0.0
-        total_active = 0.0
-        num_batches = 0
-
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
-        for batch in pbar:
-            if isinstance(batch, (list, tuple)):
-                vectors = batch[0]
-            else:
-                vectors = batch
-
-            vectors = vectors.to(self.device)
-
-            self.optimizer.zero_grad()
-
-            output = self.sae(vectors, return_loss=True)
-
-            output.loss.backward()
-            self.optimizer.step()
-
-            total_loss += output.loss.item()
-            total_recon_loss += output.reconstruction_loss.item()
-            total_sparsity_loss += output.sparsity_loss.item()
-            total_active += output.active_features
-            num_batches += 1
-
-            pbar.set_postfix({
-                "loss": f"{output.loss.item():.4f}",
-                "recon": f"{output.reconstruction_loss.item():.4f}",
-                "active": f"{output.active_features}"
-            })
-
-        metrics = {
-            "loss": total_loss / num_batches,
-            "reconstruction_loss": total_recon_loss / num_batches,
-            "sparsity_loss": total_sparsity_loss / num_batches,
-            "active_features": total_active / num_batches
-        }
-
-        self.history.append(metrics)
-        return metrics
-
-    def train(
-        self,
-        vectors: torch.Tensor,
-        epochs: int = 10,
-        batch_size: int = 256,
-        shuffle: bool = True
-    ) -> List[Dict[str, float]]:
-        """
-        Train SAE on pre-computed SPLADE vectors.
-
-        Args:
-            vectors: SPLADE vectors [num_docs, vocab_size]
-            epochs: Number of training epochs
-            batch_size: Training batch size
-            shuffle: Whether to shuffle data
-
-        Returns:
-            Training history
-        """
-        dataset = TensorDataset(vectors)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle
-        )
-
-        for epoch in range(epochs):
-            metrics = self.train_epoch(dataloader, epoch)
-            print(f"Epoch {epoch}: loss={metrics['loss']:.4f}, "
-                  f"recon={metrics['reconstruction_loss']:.4f}, "
-                  f"active={metrics['active_features']:.1f}")
-
-        return self.history
-
-    def save_checkpoint(self, path: str):
-        """Save SAE checkpoint."""
-        torch.save({
-            "sae_state_dict": self.sae.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "history": self.history,
-            "config": {
-                "input_dim": self.sae.input_dim,
-                "hidden_dim": self.sae.hidden_dim,
-                "k": self.sae.k,
-                "sparsity_coefficient": self.sae.sparsity_coefficient,
-                "activation": self.sae.activation_type
-            }
-        }, path)
-
-    @classmethod
-    def load_checkpoint(cls, path: str, device: Optional[torch.device] = None):
-        """Load SAE from checkpoint."""
-        checkpoint = torch.load(path, map_location=device)
-        config = checkpoint["config"]
-
-        sae = SparseAutoencoder(
-            input_dim=config["input_dim"],
-            hidden_dim=config["hidden_dim"],
-            k=config["k"],
-            sparsity_coefficient=config["sparsity_coefficient"],
-            activation=config["activation"]
-        )
-        sae.load_state_dict(checkpoint["sae_state_dict"])
-
-        trainer = cls(sae, device=device)
-        trainer.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        trainer.history = checkpoint["history"]
-
-        return trainer
-
-
-def extract_splade_vectors(
-    model: nn.Module,
-    dataloader: DataLoader,
-    device: torch.device
-) -> torch.Tensor:
-    """
-    Extract SPLADE vectors from a trained model.
-
-    Args:
-        model: Trained SPLADE classifier
-        dataloader: DataLoader for the dataset
-        device: Device to use
-
-    Returns:
-        vectors: Stacked SPLADE vectors [num_docs, vocab_size]
-    """
-    model.eval()
-    all_vectors = []
-
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Extracting vectors"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-
-            # Get sparse vectors (not logits)
-            _, sparse_vec = model(input_ids, attention_mask)
-            all_vectors.append(sparse_vec.cpu())
-
-    return torch.cat(all_vectors, dim=0)
 
 
 if __name__ == "__main__":

@@ -1,109 +1,140 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
+"""
+SPLADE classifier training script.
+
+Supports two data sources:
+    Option A - Local files:
+        python -m src.train --train_path data/train.csv --test_path data/test.csv --epochs 5
+
+    Option B - HuggingFace datasets:
+        python -m src.train --dataset imdb --epochs 5
+        python -m src.train --dataset ag_news --epochs 5
+"""
+
 import argparse
 import os
-import random
-import numpy as np
-from src.models import DistilBERTSparseClassifier
-from src.data import get_data_loaders
-from src.regularizers import flops_regularization
-from src.evaluation import evaluate
 import time
 
-
-def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+from src.models import SPLADEClassifier
+from src.data import load_classification_data
+from src.utils import validate_data_sources
 
 
 def train(args):
-    # Set seed for reproducibility
-    if args.seed is not None:
-        set_seed(args.seed)
-        print(f"Random seed set to {args.seed}")
+    """Train SPLADE classifier using the sklearn-style API."""
+    print("Loading data...")
 
-    # 1. Load Data
-    print(f"Loading data from {args.data_dir}...")
-    train_loader, test_loader = get_data_loaders(
-        os.path.join(args.data_dir, 'movie_reviews_train.txt'),
-        os.path.join(args.data_dir, 'movie_reviews_test.txt'),
-        batch_size=args.batch_size
+    # Validate inputs
+    has_local, has_hf = validate_data_sources(
+        args.train_path, args.test_path, args.dataset,
+        raise_on_error=False, print_error=True
+    )
+    if not has_local and not has_hf:
+        return
+
+    # Load data as raw texts and labels
+    if has_local:
+        print(f"  Source: Local files")
+        print(f"  Train: {args.train_path}")
+        print(f"  Test: {args.test_path}")
+        train_texts, train_labels, train_meta = load_classification_data(
+            file_path=args.train_path,
+            max_samples=args.max_train_samples
+        )
+        test_texts, test_labels, test_meta = load_classification_data(
+            file_path=args.test_path
+        )
+        num_labels = train_meta.get('num_labels', max(train_labels) + 1)
+        class_names = None
+    else:
+        print(f"  Source: HuggingFace dataset '{args.dataset}'")
+        train_texts, train_labels, train_meta = load_classification_data(
+            dataset=args.dataset,
+            split="train",
+            max_samples=args.max_train_samples
+        )
+        test_texts, test_labels, test_meta = load_classification_data(
+            dataset=args.dataset,
+            split="test"
+        )
+        num_labels = train_meta['num_labels']
+        class_names = train_meta.get('class_names')
+
+    print(f"  Train samples: {len(train_texts)}")
+    print(f"  Test samples: {len(test_texts)}")
+    print(f"  Num labels: {num_labels}")
+    if class_names:
+        print(f"  Classes: {class_names}")
+
+    # Create and train classifier
+    clf = SPLADEClassifier(
+        num_labels=num_labels,
+        class_names=class_names,
+        batch_size=args.batch_size,
+        learning_rate=args.lr,
+        flops_lambda=args.flops_lambda,
+        verbose=True,
     )
 
-    # 2. Init Model
-    model = DistilBERTSparseClassifier()
-    
-    # Check for GPU
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    model.to(device)
-
-    # Optimizer (Transformer needs smaller LR, usually)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
-    criterion = nn.BCEWithLogitsLoss()
-
-    print(f"Starting training for {args.epochs} epochs with FLOPS lambda={args.flops_lambda}...")
-    
+    print(f"\nStarting training for {args.epochs} epochs...")
     start_time = time.time()
-    
-    for epoch in range(args.epochs):
-        model.train()
-        total_loss = 0
-        total_flops_loss = 0
-        
-        for batch in train_loader:
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            y = batch['label'].unsqueeze(1).to(device)
-            
-            optimizer.zero_grad()
-            
-            # Forward
-            logits, sparse_vec = model(input_ids, attention_mask)
-            
-            # Loss Calculation
-            # Task Loss (Classification)
-            bce_loss = criterion(logits, y)
-            
-            # Sparsity Loss (FLOPS Regularization)
-            flops_loss = args.flops_lambda * flops_regularization(sparse_vec)
-            
-            loss = bce_loss + flops_loss
-            
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            total_flops_loss += flops_loss.item()
-            
-        # Evaluation
-        acc, f1, sparsity = evaluate(model, test_loader, device)
-        print(f"Epoch {epoch+1}/{args.epochs} | Loss: {total_loss:.4f} (FLOPS: {total_flops_loss:.4f}) | Test Acc: {acc:.4f} | F1: {f1:.4f} | Sparsity: {sparsity:.2f}%")
 
-    print(f"Training finished in {time.time() - start_time:.2f}s")
-    
-    # Save Model
+    clf.fit(train_texts, train_labels, epochs=args.epochs)
+
+    print(f"\nTraining finished in {time.time() - start_time:.2f}s")
+
+    # Evaluate
+    accuracy = clf.score(test_texts, test_labels)
+    sparsity = clf.get_sparsity(test_texts[:100])  # Sample for speed
+    print(f"Test Accuracy: {accuracy:.4f}")
+    print(f"Sparsity: {sparsity:.2f}%")
+
+    # Save model
+    model_path = os.path.join(args.output_dir, 'model.pth')
     os.makedirs(args.output_dir, exist_ok=True)
-    # Save the whole model or state dict (state dict preferred)
-    torch.save(model.state_dict(), os.path.join(args.output_dir, 'model.pth'))
-    print(f"Model saved to {args.output_dir}")
+    clf.save(model_path)
+    print(f"Model saved to {model_path}")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='Data', help='Directory containing train/test files')
-    parser.add_argument('--output_dir', type=str, default='models', help='Directory to save models')
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--lr', type=float, default=2e-5, help="Learning rate (default: 2e-5 for Transformers)")
-    parser.add_argument('--flops_lambda', type=float, default=1e-4, help='Regularization strength for FLOPS sparsity')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser = argparse.ArgumentParser(
+        description="Train SPLADE classifier on text classification data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Train on local CSV/TSV files
+  python -m src.train --train_path data/train.csv --test_path data/test.csv --epochs 5
+
+  # Train on HuggingFace dataset
+  python -m src.train --dataset imdb --epochs 5
+  python -m src.train --dataset ag_news --epochs 3
+
+  # Quick test with limited samples
+  python -m src.train --dataset ag_news --epochs 1 --max_train_samples 1000
+        """
+    )
+
+    # Data source options
+    data_group = parser.add_argument_group('Data Source (choose one)')
+    data_group.add_argument('--train_path', type=str, default=None,
+                           help='Path to training CSV/TSV file')
+    data_group.add_argument('--test_path', type=str, default=None,
+                           help='Path to test CSV/TSV file')
+    data_group.add_argument('--dataset', type=str, default=None,
+                           help='HuggingFace dataset name (e.g., imdb, ag_news)')
+
+    # Training options
+    parser.add_argument('--max_train_samples', type=int, default=None,
+                       help='Limit training samples (for debugging)')
+    parser.add_argument('--output_dir', type=str, default='models',
+                       help='Directory to save trained model')
+    parser.add_argument('--batch_size', type=int, default=32,
+                       help='Training batch size')
+    parser.add_argument('--epochs', type=int, default=5,
+                       help='Number of training epochs')
+    parser.add_argument('--lr', type=float, default=2e-5,
+                       help='Learning rate')
+    parser.add_argument('--flops_lambda', type=float, default=1e-4,
+                       help='FLOPS regularization strength')
 
     args = parser.parse_args()
     train(args)

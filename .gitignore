@@ -50,6 +50,10 @@ mlruns/
 tensorboard/
 .cache/
 
+# HuggingFace cache
+~/.cache/huggingface/
+*.hf_cache/
+
 # Editor/OS
 .vscode/
 .idea/

@@ -5,32 +5,32 @@ Usage:
     python -m src.run_beir_eval --model_path models/model.pth --dataset nfcorpus
 """
 
-import torch
 import argparse
 import os
 
 from transformers import AutoTokenizer
-from src.models import DistilBERTSparseClassifier
+
+from src.models import SPLADEClassifier
 from src.evaluation.beir_eval import evaluate_on_beir, BEIR_QUICK_DATASETS
 
 
 def main(args):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Load model using SPLADEClassifier
+    print(f"Loading model from {args.model_path}...")
+    clf = SPLADEClassifier(verbose=False)
+    clf.load(args.model_path)
+    print(f"Using device: {clf.device}")
+
+    # Get internal PyTorch model for BEIR eval
+    model = clf.model
+    model.eval()
 
     # Load tokenizer
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
 
-    # Load model
-    print(f"Loading model from {args.model_path}...")
-    model = DistilBERTSparseClassifier()
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
-    model.to(device)
-    model.eval()
-
     print(f"\nEvaluating on BEIR dataset: {args.dataset}")
-    print("Note: This model was trained for sentiment classification, not retrieval.")
+    print("Note: This model was trained for classification, not retrieval.")
     print("      Retrieval metrics serve as a baseline/demonstration.\n")
 
     try:
@@ -42,7 +42,7 @@ def main(args):
             batch_size=args.batch_size,
             max_length=args.max_length,
             top_k=args.top_k,
-            device=device
+            device=clf.device
         )
 
         # Save results

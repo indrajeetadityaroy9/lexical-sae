@@ -12,7 +12,6 @@ from .beir_eval import (
     BEIRResults,
     SPLADERetriever,
     evaluate_on_beir,
-    evaluate_on_multiple_datasets,
     BEIR_DATASETS,
     BEIR_QUICK_DATASETS,
 )
@@ -25,7 +24,6 @@ __all__ = [
     "BEIRResults",
     "SPLADERetriever",
     "evaluate_on_beir",
-    "evaluate_on_multiple_datasets",
     "BEIR_DATASETS",
     "BEIR_QUICK_DATASETS",
 ]

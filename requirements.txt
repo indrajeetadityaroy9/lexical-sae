@@ -7,6 +7,8 @@ nltk>=3.8.0
 notebook>=7.0.0
 torch>=2.0.0
 transformers>=4.35.0
+datasets>=2.14.0
+tqdm>=4.65.0
 
 # Mistral/LLM fine-tuning
 accelerate>=0.24.0
@@ -25,11 +27,6 @@ umap-learn>=0.5.0
 # Benchmarking
 beir>=2.0.0
 pytrec-eval>=0.5
-
-# Experiment tracking
-wandb>=0.15.0
-omegaconf>=2.3.0
-pydantic>=2.0.0
 
 # Testing
 pytest>=7.0.0
