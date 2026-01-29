@@ -1,24 +1,46 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "torch>=2.0.0", "pybind11>=2.10.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "splade-classifier"
+name = "sae-classifier"
 version = "0.1.0"
-requires-python = ">=3.9"
+description = "SAE-based interpretable text classifier with faithful explanations"
+requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24.0",
-    "pandas>=2.0.0",
-    "scipy>=1.10.0",
-    "scikit-learn>=1.3.0",
-    "nltk>=3.8.0",
     "torch>=2.0.0",
     "transformers>=4.35.0",
     "datasets>=2.14.0",
+    "numpy>=1.24.0",
     "tqdm>=4.65.0",
+    "scikit-learn>=1.3.0",
+    "einops>=0.7.0",
+]
+
+[project.optional-dependencies]
+baselines = [
+    "lime>=0.2.0",
+    "shap>=0.42.0",
+    "captum>=0.6.0",
+]
+autointerpret = [
+    "openai>=1.0.0",
+    "anthropic>=0.20.0",
+]
+splade = [
     "triton>=2.0.0",
 ]
+dev = [
+    "pytest>=7.0.0",
+]
+all = [
+    "sae-classifier[baselines,autointerpret,splade]",
+]
+
+[project.scripts]
+sae-benchmark = "sae_classifier.benchmark:main"
+sae-interpretability = "sae_classifier.interpretability_benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["sae_classifier*", "splade_classifier*"]

@@ -1,16 +1,16 @@
-# Python bytecode/cache
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.egg-info/
+dist/
+build/
 
 # Virtual environments
 .venv/
 venv/
-ENV/
-env/
 .env
 
-# Test/coverage caches
+# Test/coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -19,70 +19,37 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
-notebooks/executed_*.ipynb
 
-# Model artifacts and checkpoints
+# Model artifacts
 models/
-models_test/
-models_improved/
-checkpoints/
-outputs/
 *.pth
 *.pt
-*.bin
-*.ckpt
 *.safetensors
 
-# Data and datasets
-Data/
+# Data
 data/
-datasets/
 *.csv
 *.json
 *.jsonl
-*.parquet
-*.arrow
 
-# Logs and experiment tracking
+# Logs
 *.log
 logs/
 wandb/
-mlruns/
-tensorboard/
+
+# Cache
 .cache/
+.huggingface/
 
-# HuggingFace cache
-~/.cache/huggingface/
-*.hf_cache/
-
-# Editor/OS
+# Editor/IDE
 .vscode/
 .idea/
 .DS_Store
 
-# Egg info and dist
-*.egg-info/
-dist/
-build/
-
-# CUDA compiled extensions
+# Compiled extensions
 *.so
-src/ops/cuda/*.so
-splade_cuda_kernels*.so
 
-# Vectors and embeddings
-vectors/
-embeddings/
-*.npy
-*.npz
-
-# Temporary files
-tmp/
-tmp_bert_*/
-*.tmp
-
-# Results
+# Results/benchmarks
 results/
-
-# NLTK data
-nltk_data/
+.benchmarks/
+benchmark_results/
