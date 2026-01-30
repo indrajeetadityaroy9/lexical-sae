@@ -164,17 +164,6 @@ Hybrid CUDA C++ (forward) + Triton (backward) backend:
 | PyTorch baseline | 1.28 ms | 1.0x |
 | Triton | 0.22 ms | 5.9x |
 | **CUDA C++** | **0.17 ms** | **7.4x** |
-
-## Citation
-
-If you use this work, please cite:
-
-```bibtex
-@software{splade_classifier,
-  title={Faithful by Construction: Sparse Lexical Representations as Inherently Interpretable Text Classifiers},
-  year={2025},
-  url={https://github.com/...}
-}
 ```
 
 ## References
