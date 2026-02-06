@@ -113,18 +113,31 @@ class TestExplain:
             assert isinstance(item[0], str)
             assert isinstance(item[1], float)
 
-    def test_weights_non_negative(self, clf):
+    def test_weights_nonzero(self, clf):
+        """explain() now returns classifier-weighted contributions (can be negative)."""
         results = clf.explain("This is a test sentence", top_k=5)
         for _, weight in results:
-            assert weight > 0
+            assert weight != 0
 
     def test_respects_top_k(self, clf):
         results = clf.explain("This is a test sentence for explanation", top_k=3)
         assert len(results) <= 3
 
-    def test_weights_descending(self, clf):
+    def test_weights_descending_by_abs(self, clf):
+        """Weights should be sorted by absolute value (descending)."""
         results = clf.explain("The movie was absolutely fantastic and wonderful", top_k=5)
         if len(results) > 1:
-            weights = [w for _, w in results]
-            for i in range(len(weights) - 1):
-                assert weights[i] >= weights[i + 1], "Weights should be in descending order"
+            abs_weights = [abs(w) for _, w in results]
+            for i in range(len(abs_weights) - 1):
+                assert abs_weights[i] >= abs_weights[i + 1], \
+                    "Weights should be in descending order by absolute value"
+
+    def test_target_class_parameter(self, clf):
+        """explain() should accept target_class parameter."""
+        results_auto = clf.explain("This is a good movie", top_k=5)
+        results_c0 = clf.explain("This is a good movie", top_k=5, target_class=0)
+        results_c1 = clf.explain("This is a good movie", top_k=5, target_class=1)
+        # Different classes should generally give different explanations
+        assert isinstance(results_c0, list)
+        assert isinstance(results_c1, list)
+

@@ -3,12 +3,95 @@
 import torch
 import pytest
 
-from src.kernels import (
-    DocumentFrequencyTracker,
-    DFFlopsRegFunction,
+from src.models.components import (
     SpladeAggregateFunction,
     splade_aggregate,
+    splade_aggregate_gated,
 )
+from src.training.losses import (
+    DFFlopsRegFunction,
+    DocumentFrequencyTracker,
+    sparse_contrastive_loss,
+)
+
+
+class TestForwardKernel:
+    def test_matches_pytorch_reference(self):
+        """Triton forward kernel matches PyTorch log1p(relu) + mask + max."""
+        torch.manual_seed(42)
+        logits = torch.randn(2, 5, 100, device="cuda")
+        mask = torch.ones(2, 5, device="cuda")
+        mask[0, 3:] = 0
+
+        result_triton = splade_aggregate(logits, mask)
+
+        # PyTorch reference
+        activated = torch.log1p(torch.relu(logits.float()))
+        activated = activated.masked_fill(~mask.unsqueeze(-1).bool(), 0.0)
+        result_pytorch = activated.max(dim=1).values
+
+        torch.testing.assert_close(result_triton, result_pytorch, atol=1e-5, rtol=1e-5)
+
+    def test_all_masked_returns_zeros(self):
+        """All-masked input should produce zero output."""
+        logits = torch.randn(1, 4, 50, device="cuda")
+        mask = torch.zeros(1, 4, device="cuda")
+        result = splade_aggregate(logits, mask)
+        assert (result == 0.0).all()
+
+    def test_output_shape(self):
+        logits = torch.randn(3, 7, 50, device="cuda")
+        mask = torch.ones(3, 7, device="cuda")
+        result = splade_aggregate(logits, mask)
+        assert result.shape == (3, 50)
+
+    def test_non_negative_output(self):
+        """log1p(relu(x)) >= 0, so output should be non-negative."""
+        torch.manual_seed(123)
+        logits = torch.randn(4, 10, 200, device="cuda")
+        mask = torch.ones(4, 10, device="cuda")
+        result = splade_aggregate(logits, mask)
+        assert (result >= 0).all()
+
+
+class TestGatedForwardKernel:
+    def test_matches_separate_aggregate_and_gate(self):
+        """Gated kernel should match: aggregate then apply (gate > 0)."""
+        torch.manual_seed(42)
+        logits = torch.randn(2, 5, 100, device="cuda")
+        mask = torch.ones(2, 5, device="cuda")
+        mask[0, 3:] = 0
+        gate_logits = torch.randn(100, device="cuda")
+
+        result_fused = splade_aggregate_gated(logits, mask, gate_logits)
+
+        # Reference: separate aggregate + manual gating
+        result_separate = splade_aggregate(logits, mask)
+        gate_mask = (gate_logits > 0).float()
+        result_separate = result_separate * gate_mask
+
+        torch.testing.assert_close(result_fused, result_separate, atol=1e-5, rtol=1e-5)
+
+    def test_all_gates_open(self):
+        """All-positive gate_logits should match plain aggregate."""
+        torch.manual_seed(42)
+        logits = torch.randn(2, 5, 50, device="cuda")
+        mask = torch.ones(2, 5, device="cuda")
+        gate_logits = torch.ones(50, device="cuda")
+
+        result_gated = splade_aggregate_gated(logits, mask, gate_logits)
+        result_plain = splade_aggregate(logits, mask)
+
+        torch.testing.assert_close(result_gated, result_plain, atol=1e-5, rtol=1e-5)
+
+    def test_all_gates_closed(self):
+        """All-negative gate_logits should produce zeros."""
+        logits = torch.randn(2, 5, 50, device="cuda")
+        mask = torch.ones(2, 5, device="cuda")
+        gate_logits = -torch.ones(50, device="cuda")
+
+        result = splade_aggregate_gated(logits, mask, gate_logits)
+        assert (result == 0.0).all()
 
 
 class TestSpladeAggregate:
@@ -107,3 +190,57 @@ class TestDocumentFrequencyTracker:
         stats = tracker.get_stats()
         assert stats["doc_count"] == 2
         assert stats["top1_df_pct"] == 100.0  # term 0 and 2 appear in both docs
+
+    def test_reset(self):
+        """reset() should zero out DF counts and doc_count."""
+        tracker = DocumentFrequencyTracker(vocab_size=5, device="cuda")
+        vectors = torch.ones(3, 5, device="cuda")
+        tracker.update(vectors)
+        assert tracker.doc_count == 3
+
+        tracker.reset()
+        assert tracker.doc_count == 0
+        assert tracker.df_counts.sum().item() == 0.0
+
+
+class TestSparseContrastiveLoss:
+    def test_single_sample_returns_zero(self):
+        vecs = torch.randn(1, 100, device="cuda")
+        labels = torch.tensor([0], device="cuda")
+        loss = sparse_contrastive_loss(vecs, labels)
+        assert loss.item() == 0.0
+
+    def test_all_same_class_finite(self):
+        vecs = torch.randn(4, 100, device="cuda")
+        labels = torch.zeros(4, device="cuda", dtype=torch.long)
+        loss = sparse_contrastive_loss(vecs, labels)
+        assert loss.item() >= 0
+        assert torch.isfinite(loss)
+
+    def test_all_different_classes_returns_zero(self):
+        vecs = torch.randn(4, 100, device="cuda")
+        labels = torch.arange(4, device="cuda")
+        loss = sparse_contrastive_loss(vecs, labels)
+        assert loss.item() == 0.0
+
+    def test_gradient_flows(self):
+        vecs = torch.randn(4, 100, device="cuda", requires_grad=True)
+        labels = torch.tensor([0, 0, 1, 1], device="cuda")
+        loss = sparse_contrastive_loss(vecs, labels)
+        loss.backward()
+        assert vecs.grad is not None
+        assert torch.isfinite(vecs.grad).all()
+
+    def test_identical_vectors_finite(self):
+        vecs = torch.ones(4, 100, device="cuda")
+        labels = torch.tensor([0, 0, 1, 1], device="cuda")
+        loss = sparse_contrastive_loss(vecs, labels)
+        assert torch.isfinite(loss)
+
+    def test_binary_classification(self):
+        vecs = torch.randn(8, 50, device="cuda", requires_grad=True)
+        labels = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], device="cuda")
+        loss = sparse_contrastive_loss(vecs, labels)
+        assert loss.item() > 0
+        loss.backward()
+        assert torch.isfinite(vecs.grad).all()

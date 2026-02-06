@@ -22,7 +22,7 @@ Key differentiators from prior work:
 
 1. **Architectural Faithfulness**: SPLADE's sparse vocabulary activations directly determine the classification output; removing high-activation terms necessarily changes predictions.
 
-2. **Baseline Superiority**: SPLADE explanations should outperform attention weights, LIME, SHAP, and Integrated Gradients on comprehensiveness, sufficiency, and normalized AOPC.
+2. **Baseline Superiority**: SPLADE explanations should outperform attention weights, LIME, and Integrated Gradients on comprehensiveness, sufficiency, and normalized AOPC.
 
 3. **Semantic Expansion**: Unlike bag-of-words, SPLADE captures semantic relationships (e.g., "fantastic" activates "excellent", "wonderful") via the MLM head, providing richer explanations.
 
@@ -58,14 +58,11 @@ SPLADE's sparse vectors ARE the prediction mechanism:
 
 ### DF-FLOPS Regularization (arXiv:2505.15070)
 
-Document-frequency weighted regularization penalizes high-DF terms to reduce posting-list lengths while improving OOD generalization. The regularization strength follows a quadratic warmup schedule:
+Document-frequency weighted regularization penalizes high-DF terms to reduce posting-list lengths while improving OOD generalization. Parameters `alpha=0.1` and `beta=10.0` are paper-mandated and applied internally during training:
 
 ```python
-clf = SPLADEClassifier(
-    num_labels=2,
-    df_alpha=0.1,  # DF threshold
-    df_beta=5.0,   # Sigmoid steepness
-)
+clf = SPLADEClassifier(num_labels=2)
+clf.fit(train_texts, train_labels)  # DF-FLOPS applied automatically
 ```
 
 ### GPU Kernels
@@ -80,7 +77,7 @@ Training uses a custom Triton backward kernel (`src/kernels.py`) for the SPLADE 
 pip install -e .
 ```
 
-Requires Python >= 3.11, CUDA GPU, and Triton. All dependencies (torch, transformers, triton, captum, lime, shap, nltk, scikit-learn, etc.) are installed automatically.
+Requires Python >= 3.10, CUDA GPU, and Triton. All dependencies (torch, transformers, triton, captum, lime, nltk, scikit-learn, etc.) are installed automatically.
 
 ---
 
@@ -115,10 +112,11 @@ sparse_vectors = clf.transform(texts)  # [n_samples, 30522]
 from src.faithfulness import compute_comprehensiveness, compute_sufficiency, compute_monotonicity
 
 attributions = [clf.explain(text, top_k=20) for text in test_texts]
+mask_token = clf.tokenizer.mask_token
 
-comp = compute_comprehensiveness(clf, test_texts, attributions, k_values=[5, 10, 20])
-suff = compute_sufficiency(clf, test_texts, attributions, k_values=[5, 10, 20])
-mono = compute_monotonicity(clf, test_texts, attributions)
+comp = compute_comprehensiveness(clf, test_texts, attributions, k_values=[5, 10, 20], mask_token=mask_token)
+suff = compute_sufficiency(clf, test_texts, attributions, k_values=[5, 10, 20], mask_token=mask_token)
+mono = compute_monotonicity(clf, test_texts, attributions, steps=10, mask_token=mask_token)
 ```
 
 ### Normalized AOPC (arXiv:2408.08137)
@@ -128,7 +126,7 @@ Standard AOPC bounds vary across models, making cross-model comparisons unreliab
 ```python
 from src.faithfulness import compute_normalized_aopc
 
-result = compute_normalized_aopc(clf, test_texts, attributions, k_max=20, beam_size=5)
+result = compute_normalized_aopc(clf, test_texts, attributions, k_max=20, beam_size=15, mask_token=mask_token)
 # {
 #     'naopc': 0.72,          # Normalized score (0-1)
 #     'aopc_lower': 0.12,     # Random ordering bound
@@ -141,41 +139,32 @@ result = compute_normalized_aopc(clf, test_texts, attributions, k_max=20, beam_s
 Addresses out-of-distribution issues in standard faithfulness evaluation by bounding the fraction of tokens that can be masked. Pass `beta < 1.0` to `compute_comprehensiveness` or `compute_sufficiency`:
 
 ```python
-f_comp = compute_comprehensiveness(clf, test_texts, attributions, k_values=[5, 10, 20], beta=0.5)
-f_suff = compute_sufficiency(clf, test_texts, attributions, k_values=[5, 10, 20], beta=0.5)
+f_comp = compute_comprehensiveness(clf, test_texts, attributions, k_values=[5, 10, 20], mask_token=mask_token, beta=0.5)
+f_suff = compute_sufficiency(clf, test_texts, attributions, k_values=[5, 10, 20], mask_token=mask_token, beta=0.5)
 ```
 
 ### Adversarial Sensitivity (arXiv:2409.17774)
 
-Tests whether explanations capture model vulnerabilities via WordNet synonym substitution:
+Tests whether explanations capture model vulnerabilities via multi-attack perturbation:
 
 ```python
-from src.adversarial import compute_adversarial_sensitivity
+from src.adversarial import compute_adversarial_sensitivity, WordNetAttack, CharacterAttack
 
 result = compute_adversarial_sensitivity(
     model=clf,
     explainer_fn=lambda text, k: clf.explain(text, top_k=k),
     texts=test_texts,
-    mcp_threshold=0.7,
+    attacks=[WordNetAttack(max_changes=3), CharacterAttack(max_changes=2)],
+    max_changes=3, mcp_threshold=0.7, top_k=20, seed=42,
 )
-# {'adversarial_sensitivity': 0.65, 'mean_tau': 0.30}
+# {'adversarial_sensitivity': 0.65, 'mean_tau': 0.30, 'per_attack': {...}}
 ```
 
 ---
 
-## Benchmarks
+## Benchmark
 
-### Performance Benchmark
-
-```bash
-python -m src.benchmark --dataset imdb --train-samples 10000 --test-samples 2000 --epochs 3
-```
-
-Options: `--dataset {ag_news,sst2,imdb,all}`, `--train-samples N`, `--test-samples N`, `--epochs N`, `--batch-size N`
-
-### Interpretability Benchmark
-
-Runs SPLADE against all four post-hoc baselines (Attention, LIME, SHAP, Integrated Gradients) on the full faithfulness metric suite:
+Runs SPLADE against three post-hoc baselines (Attention, LIME, Integrated Gradients) on the full faithfulness metric suite:
 
 ```bash
 python -m src.interpretability_benchmark --dataset sst2 --test-samples 200 --epochs 2
@@ -194,14 +183,12 @@ Options: `--dataset {sst2,ag_news,imdb,hatexplain}`, `--train-samples N`, `--tes
 SPLADEClassifier(
     num_labels: int = 2,
     model_name: str = "distilbert-base-uncased",
-    batch_size: int = 32,
-    epochs: int = 3,
-    learning_rate: float = 2e-5,
+    batch_size: int = 64,
     max_length: int = 128,
-    df_alpha: float = 0.1,   # DF-FLOPS threshold
-    df_beta: float = 5.0,    # DF-FLOPS sigmoid steepness
 )
 ```
+
+Training hyperparameters are self-adaptive: learning rate is derived from model width via muP scaling, warmup is sqrt-proportional, gradient clipping uses AGC, and regularization weight is loss-ratio balanced. Early stopping with patience=3 is used by default.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -216,11 +203,11 @@ SPLADEClassifier(
 
 | Function | Signature | Returns |
 |----------|-----------|---------|
-| `compute_comprehensiveness` | `(model, texts, attributions, k_values, beta=1.0)` | `dict[int, float]` |
-| `compute_sufficiency` | `(model, texts, attributions, k_values, beta=1.0)` | `dict[int, float]` |
-| `compute_monotonicity` | `(model, texts, attributions, steps=10)` | `float` |
-| `compute_normalized_aopc` | `(model, texts, attributions, k_max=20, beam_size=5)` | `dict` with `naopc`, `aopc_lower`, `aopc_upper` |
-| `compute_adversarial_sensitivity` | `(model, explainer_fn, texts, mcp_threshold=0.7)` | `dict` with `adversarial_sensitivity`, `mean_tau` |
+| `compute_comprehensiveness` | `(model, texts, attributions, k_values, mask_token, beta=1.0)` | `dict[int, float]` |
+| `compute_sufficiency` | `(model, texts, attributions, k_values, mask_token, beta=1.0)` | `dict[int, float]` |
+| `compute_monotonicity` | `(model, texts, attributions, steps, mask_token)` | `float` |
+| `compute_normalized_aopc` | `(model, texts, attributions, k_max, beam_size, mask_token)` | `dict` with `naopc`, `aopc_lower`, `aopc_upper` |
+| `compute_adversarial_sensitivity` | `(model, explainer_fn, texts, attacks, max_changes, mcp_threshold, top_k, seed)` | `dict` with `adversarial_sensitivity`, `mean_tau` |
 | `compute_rationale_agreement` | `(attributions, human_rationales, k)` | `float` (token-level F1) |
 
 ---

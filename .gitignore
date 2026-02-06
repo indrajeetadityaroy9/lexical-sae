@@ -53,3 +53,9 @@ wandb/
 results/
 .benchmarks/
 benchmark_results/
+
+# Checkpoints
+checkpoints/
+
+# Experiment outputs
+experiments/*/outputs/
