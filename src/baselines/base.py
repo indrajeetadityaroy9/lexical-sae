@@ -11,58 +11,66 @@ from transformers import AutoTokenizer, DistilBertForSequenceClassification
 from src.cuda import DEVICE
 
 
+def train_shared_model(
+    model_name: str, num_labels: int, texts: list[str], labels: list[int],
+    epochs: int = 3, batch_size: int = 32, learning_rate: float = 2e-5,
+    max_length: int = 128,
+) -> tuple[DistilBertForSequenceClassification, AutoTokenizer]:
+    """Train a single DistilBERT model shared by all baseline explainers."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = DistilBertForSequenceClassification.from_pretrained(
+        model_name, num_labels=num_labels,
+    ).to(DEVICE)
+
+    enc = tokenizer(
+        texts, max_length=max_length, padding="max_length",
+        truncation=True, return_tensors="pt",
+    )
+    labels_tensor = torch.tensor(labels, dtype=torch.long)
+    loader = DataLoader(
+        TensorDataset(enc["input_ids"], enc["attention_mask"], labels_tensor),
+        batch_size=batch_size, shuffle=True,
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+        for input_ids, attention_mask, batch_labels in tqdm(loader, desc=f"Shared model epoch {epoch+1}"):
+            input_ids = input_ids.to(DEVICE, non_blocking=True)
+            attention_mask = attention_mask.to(DEVICE, non_blocking=True)
+            batch_labels = batch_labels.to(DEVICE, non_blocking=True)
+
+            optimizer.zero_grad()
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=batch_labels)
+            outputs.loss.backward()
+            optimizer.step()
+            total_loss += outputs.loss.item()
+
+        print(f"Shared model epoch {epoch+1}: Loss = {total_loss/len(loader):.4f}")
+
+    model.eval()
+    return model, tokenizer
+
+
 class BaseExplainer(ABC):
-    """Base class for all explainers."""
+    """Base class for all explainers using a shared pre-trained model."""
 
     def __init__(
-        self, model_name: str = "distilbert-base-uncased",
-        num_labels: int = 2, max_length: int = 128,
+        self, model: DistilBertForSequenceClassification,
+        tokenizer: AutoTokenizer, num_labels: int, max_length: int = 128,
     ):
-        self.model_name = model_name
+        self.model = model
+        self.tokenizer = tokenizer
         self.num_labels = num_labels
         self.max_length = max_length
-        self.model = DistilBertForSequenceClassification.from_pretrained(
-            model_name, num_labels=num_labels,
-        ).to(DEVICE)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model.eval()
 
     def _tokenize(self, texts: list[str]) -> dict[str, torch.Tensor]:
         return self.tokenizer(
             texts, max_length=self.max_length, padding="max_length",
             truncation=True, return_tensors="pt",
         )
-
-    def fit(
-        self, texts: list[str], labels: list[int],
-        epochs: int = 3, batch_size: int = 32, learning_rate: float = 2e-5,
-    ) -> "BaseExplainer":
-        """Train the underlying model."""
-        enc = self._tokenize(texts)
-        labels_tensor = torch.tensor(labels, dtype=torch.long)
-        loader = DataLoader(
-            TensorDataset(enc["input_ids"], enc["attention_mask"], labels_tensor),
-            batch_size=batch_size, shuffle=True,
-        )
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-
-        self.model.train()
-        for epoch in range(epochs):
-            total_loss = 0
-            for input_ids, attention_mask, batch_labels in tqdm(loader, desc=f"Epoch {epoch+1}"):
-                input_ids = input_ids.to(DEVICE, non_blocking=True)
-                attention_mask = attention_mask.to(DEVICE, non_blocking=True)
-                batch_labels = batch_labels.to(DEVICE, non_blocking=True)
-
-                optimizer.zero_grad()
-                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=batch_labels)
-                outputs.loss.backward()
-                optimizer.step()
-                total_loss += outputs.loss.item()
-
-            print(f"Epoch {epoch+1}: Loss = {total_loss/len(loader):.4f}")
-
-        self.model.eval()
-        return self
 
     def predict_proba(self, texts: list[str]) -> list[list[float]]:
         """Predict class probabilities."""

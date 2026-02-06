@@ -2,6 +2,7 @@
 
 import numpy as np
 import shap
+from transformers import AutoTokenizer, DistilBertForSequenceClassification
 
 from src.baselines.base import BaseExplainer
 
@@ -10,30 +11,21 @@ class SHAPExplainer(BaseExplainer):
     """Generate explanations using SHAP."""
 
     def __init__(
-        self,
-        model_name: str = "distilbert-base-uncased",
-        num_labels: int = 2,
-        max_length: int = 128,
+        self, model: DistilBertForSequenceClassification,
+        tokenizer: AutoTokenizer, num_labels: int, max_length: int = 128,
         max_evals: int = 500,
     ):
-        super().__init__(model_name, num_labels, max_length)
+        super().__init__(model, tokenizer, num_labels, max_length)
         self.max_evals = max_evals
-        self._shap_explainer = None
+        self._shap_explainer = shap.Explainer(
+            self._predict_fn, self.tokenizer,
+            output_names=[f"class_{i}" for i in range(self.num_labels)],
+        )
 
     def _predict_fn(self, texts):
         if isinstance(texts, str):
             texts = [texts]
         return np.array(self.predict_proba(list(texts)))
-
-    def fit(self, texts: list[str], labels: list[int], epochs: int = 3,
-            batch_size: int = 32, learning_rate: float = 2e-5) -> "SHAPExplainer":
-        """Fine-tune model and initialize SHAP partition explainer."""
-        super().fit(texts, labels, epochs, batch_size, learning_rate)
-        self._shap_explainer = shap.Explainer(
-            self._predict_fn, self.tokenizer,
-            output_names=[f"class_{i}" for i in range(self.num_labels)],
-        )
-        return self
 
     def explain(self, text: str, top_k: int = 10) -> list[tuple[str, float]]:
         """Compute SHAP values for the predicted class."""

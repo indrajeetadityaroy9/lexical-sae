@@ -1,12 +1,31 @@
 """Faithfulness metrics for interpretability evaluation."""
 
+import random
 from typing import Protocol
 
 import numpy as np
 
+_FILLER_TOKENS = ["the", "a", "an", "is", "was", "and", "or", "but", "in", "on"]
+
 
 class Predictor(Protocol):
     def predict_proba(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def _top_k_tokens(attrib: list[tuple[str, float]], k: int) -> set[str]:
+    """Select top-k tokens by weight, preserving importance ordering."""
+    seen: set[str] = set()
+    result: set[str] = set()
+    for t, w in attrib:
+        if w <= 0:
+            continue
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            result.add(tl)
+            if len(result) >= k:
+                break
+    return result
 
 
 def _mask_by_token_set(
@@ -52,8 +71,7 @@ def compute_comprehensiveness(
         pred_class = int(np.argmax(orig_proba))
         orig_conf = orig_proba[pred_class]
         for k in k_values:
-            top_tokens = {t.lower() for t, w in attrib if w > 0}
-            top_tokens = set(list(top_tokens)[:k])
+            top_tokens = _top_k_tokens(attrib, k)
             masked_text = _mask_by_token_set(
                 text, top_tokens, mask_token,
                 mode="remove", max_fraction=beta,
@@ -78,8 +96,7 @@ def compute_sufficiency(
         pred_class = int(np.argmax(orig_proba))
         orig_conf = orig_proba[pred_class]
         for k in k_values:
-            top_tokens = {t.lower() for t, w in attrib if w > 0}
-            top_tokens = set(list(top_tokens)[:k])
+            top_tokens = _top_k_tokens(attrib, k)
             reduced_text = _mask_by_token_set(
                 text, top_tokens, mask_token,
                 mode="keep", max_fraction=beta,
@@ -165,7 +182,7 @@ def _beam_search_ordering(
 def compute_normalized_aopc(
     model: Predictor, texts: list[str],
     attributions: list[list[tuple[str, float]]],
-    k_max: int = 20, beam_size: int = 5, n_random_samples: int = 10,
+    k_max: int = 20, beam_size: int = 15, n_random_samples: int = 10,
     mask_token: str = "[MASK]",
 ) -> dict[str, float]:
     """Normalized AOPC (arXiv:2408.08137)."""
@@ -194,3 +211,38 @@ def compute_normalized_aopc(
         "aopc_lower": float(lower_mean),
         "aopc_upper": float(upper_mean),
     }
+
+
+def compute_filler_comprehensiveness(
+    model: Predictor, texts: list[str],
+    attributions: list[list[tuple[str, float]]],
+    k_values: list[int] = [1, 5, 10, 20],
+    seed: int = 42,
+) -> dict[int, float]:
+    """Comprehensiveness using filler tokens instead of [MASK] (arXiv:2502.18848).
+
+    Replaces top-k tokens with neutral filler words to avoid OOD artifacts
+    that inflate mask-based metrics (Goodhart's Law, arXiv:2308.14272).
+    """
+    rng = random.Random(seed)
+    results = {k: [] for k in k_values}
+    original_probas = model.predict_proba(texts)
+
+    for text, attrib, orig_proba in zip(texts, attributions, original_probas):
+        pred_class = int(np.argmax(orig_proba))
+        orig_conf = orig_proba[pred_class]
+        top_tokens_all = _top_k_tokens(attrib, max(k_values))
+
+        for k in k_values:
+            top_tokens = _top_k_tokens(attrib, k)
+            normalized = {t.lstrip("#").lower() for t in top_tokens}
+            words = text.split()
+            filled_words = [
+                rng.choice(_FILLER_TOKENS) if w.lower().strip('.,!?;:"\'-') in normalized else w
+                for w in words
+            ]
+            filled_text = ' '.join(filled_words)
+            filled_conf = model.predict_proba([filled_text])[0][pred_class]
+            results[k].append(orig_conf - filled_conf)
+
+    return {k: float(np.mean(scores)) for k, scores in results.items()}

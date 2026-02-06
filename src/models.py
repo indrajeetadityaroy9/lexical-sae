@@ -40,7 +40,7 @@ class _LRScheduler:
 class _LambdaSchedule:
     """Quadratic lambda warmup for FLOPS regularization (arXiv:2505.15070)."""
 
-    def __init__(self, lambda_init: float = 0.1, lambda_peak: float = 10.0, warmup_steps: int = 30_000):
+    def __init__(self, warmup_steps: int, lambda_init: float = 0.1, lambda_peak: float = 10.0):
         self.lambda_init = lambda_init
         self.lambda_peak = lambda_peak
         self.warmup_steps = warmup_steps
@@ -62,7 +62,7 @@ class _LambdaSchedule:
 
 
 class _SpladeEncoder(nn.Module):
-    def __init__(self, model_name: str, num_labels: int):
+    def __init__(self, model_name: str, num_labels: int, classifier_dropout: float = 0.1):
         super().__init__()
         config = AutoConfig.from_pretrained(model_name)
         self.vocab_size = config.vocab_size
@@ -77,6 +77,7 @@ class _SpladeEncoder(nn.Module):
         self.vocab_projector.load_state_dict(mlm.vocab_projector.state_dict())
         del mlm
 
+        self.classifier_dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(self.vocab_size, num_labels)
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,7 +86,7 @@ class _SpladeEncoder(nn.Module):
         mlm_logits = self.vocab_projector(transformed)
 
         sparse_vec = SpladeAggregateFunction.apply(mlm_logits, attention_mask) if self.training else splade_aggregate(mlm_logits, attention_mask)
-        return self.classifier(sparse_vec), sparse_vec
+        return self.classifier(self.classifier_dropout(sparse_vec)), sparse_vec
 
 
 class SPLADEClassifier:
@@ -101,6 +102,7 @@ class SPLADEClassifier:
         max_length: int = 128,
         df_alpha: float = 0.1,
         df_beta: float = 5.0,
+        classifier_dropout: float = 0.1,
     ):
         self.num_labels = num_labels
         self.model_name = model_name
@@ -111,8 +113,7 @@ class SPLADEClassifier:
         self.df_alpha = df_alpha
         self.df_beta = df_beta
 
-        self.scaler = torch.amp.GradScaler("cuda")
-        self.model = _SpladeEncoder(model_name, num_labels).to(DEVICE)
+        self.model = _SpladeEncoder(model_name, num_labels, classifier_dropout).to(DEVICE)
         self.model.bert = torch.compile(self.model.bert, mode="reduce-overhead", fullgraph=False)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -146,11 +147,24 @@ class SPLADEClassifier:
         sparse = torch.cat(all_sparse, dim=0) if extract_sparse else None
         return logits, sparse
 
+    @staticmethod
+    def _validate_texts(X: list[str], name: str = "X") -> None:
+        if not X:
+            raise ValueError(f"{name} must be a non-empty list of strings")
+        if not all(isinstance(x, str) for x in X):
+            raise TypeError(f"All elements of {name} must be strings")
+
     def fit(self, X: list[str], y, epochs: int | None = None) -> "SPLADEClassifier":
+        self._validate_texts(X)
+        if len(X) != len(y):
+            raise ValueError(f"X and y must have same length, got {len(X)} and {len(y)}")
         if epochs is None:
             epochs = self.epochs
 
-        self._lambda_schedule = _LambdaSchedule()
+        steps_per_epoch = -(-len(X) // self.batch_size)
+        total_steps = steps_per_epoch * epochs
+        warmup_steps = max(int(total_steps * 0.3), 1)
+        self._lambda_schedule = _LambdaSchedule(warmup_steps=warmup_steps)
         self._df_tracker = DocumentFrequencyTracker(
             vocab_size=self.model.vocab_size, device=DEVICE,
         )
@@ -163,7 +177,12 @@ class SPLADEClassifier:
             num_workers=4, pin_memory=True, prefetch_factor=2, persistent_workers=True,
         )
 
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate)
+        no_decay = {"bias", "LayerNorm.weight", "vocab_layer_norm.weight"}
+        param_groups = [
+            {"params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)], "weight_decay": 0.01},
+            {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+        ]
+        optimizer = torch.optim.AdamW(param_groups, lr=self.learning_rate)
         self._lr_scheduler = _LRScheduler(
             base_lr=self.learning_rate, num_samples=len(X),
             batch_size=self.batch_size, epochs=epochs,
@@ -193,9 +212,9 @@ class SPLADEClassifier:
                     cls_loss = criterion(logits.squeeze(-1), labels) if self.num_labels == 1 else criterion(logits, labels.view(-1))
                     loss = cls_loss + reg_loss
 
-                self.scaler.scale(loss).backward()
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
 
                 total_loss += loss.item()
                 num_batches += 1
@@ -208,6 +227,7 @@ class SPLADEClassifier:
         return self
 
     def predict_proba(self, X: list[str]) -> list[list[float]]:
+        self._validate_texts(X)
         enc = self._tokenize(X)
         logits, _ = self._run_inference_loop(enc["input_ids"], enc["attention_mask"])
         if self.num_labels == 1:
@@ -218,6 +238,7 @@ class SPLADEClassifier:
         return probs.tolist()
 
     def predict(self, X: list[str]) -> list[int]:
+        self._validate_texts(X)
         enc = self._tokenize(X)
         logits, _ = self._run_inference_loop(enc["input_ids"], enc["attention_mask"])
         if self.num_labels == 1:
@@ -225,20 +246,36 @@ class SPLADEClassifier:
         return logits.argmax(dim=1).tolist()
 
     def score(self, X: list[str], y) -> float:
+        self._validate_texts(X)
+        if not y:
+            raise ValueError("y must be non-empty")
         return sum(p == t for p, t in zip(self.predict(X), y)) / len(y)
 
     def transform(self, X: list[str]) -> np.ndarray:
         """Returns sparse SPLADE vectors [n_samples, vocab_size]."""
+        self._validate_texts(X)
         enc = self._tokenize(X)
         _, sparse = self._run_inference_loop(enc["input_ids"], enc["attention_mask"], extract_sparse=True)
         return sparse.numpy()
 
+    _SPECIAL_TOKENS = {"[CLS]", "[SEP]", "[UNK]", "[MASK]", "[PAD]"}
+
     def explain(self, text: str, top_k: int = 10) -> list[tuple[str, float]]:
         """Returns top-k (token, weight) pairs explaining the prediction."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1")
         sparse_vec = self.transform([text])[0]
-        top_indices = np.argsort(sparse_vec)[-top_k:][::-1]
-        return [
-            (self.tokenizer.convert_ids_to_tokens(int(idx)), float(sparse_vec[idx]))
-            for idx in top_indices if sparse_vec[idx] > 0
-        ]
+        top_indices = np.argsort(sparse_vec)[-(top_k + len(self._SPECIAL_TOKENS)):][::-1]
+        results = []
+        for idx in top_indices:
+            if sparse_vec[idx] <= 0:
+                break
+            token = self.tokenizer.convert_ids_to_tokens(int(idx))
+            if token not in self._SPECIAL_TOKENS:
+                results.append((token, float(sparse_vec[idx])))
+            if len(results) >= top_k:
+                break
+        return results
 

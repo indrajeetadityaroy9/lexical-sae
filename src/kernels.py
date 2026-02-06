@@ -103,7 +103,9 @@ class DocumentFrequencyTracker:
         """Compute DF-based penalty weights: w_t = 1 / (1 + (x^(log_alpha(2)) - 1)^beta)."""
         df_ratio = self.df_counts / self.doc_count
         eps = _EPS[df_ratio.dtype]['log']
-        log_alpha_2 = torch.log(torch.tensor(2.0, device=self.device)) / torch.log(torch.tensor(alpha, device=self.device) + eps)
+        log_alpha = torch.log(torch.tensor(alpha, device=self.device))
+        log_alpha = torch.where(log_alpha.abs() < eps, torch.tensor(eps, device=self.device), log_alpha)
+        log_alpha_2 = torch.log(torch.tensor(2.0, device=self.device)) / log_alpha
 
         x_clamped = df_ratio.clamp(min=1e-8)
         x_pow = x_clamped.pow(log_alpha_2)

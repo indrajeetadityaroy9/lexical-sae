@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+from transformers import AutoTokenizer, DistilBertForSequenceClassification
 
 from src.baselines.base import BaseExplainer
 from src.cuda import DEVICE
@@ -10,8 +11,12 @@ from src.cuda import DEVICE
 class AttentionExplainer(BaseExplainer):
     """Explanations from DistilBERT last-layer attention weights."""
 
-    def __init__(self, model_name: str = "distilbert-base-uncased", num_labels: int = 2, max_length: int = 128):
-        super().__init__(model_name, num_labels, max_length)
+    def __init__(
+        self, model: DistilBertForSequenceClassification,
+        tokenizer: AutoTokenizer, num_labels: int, max_length: int = 128,
+    ):
+        super().__init__(model, tokenizer, num_labels, max_length)
+        self.model.config._attn_implementation = "eager"
         self.model.config.output_attentions = True
 
     def explain(self, text: str, top_k: int = 10) -> list[tuple[str, float]]:

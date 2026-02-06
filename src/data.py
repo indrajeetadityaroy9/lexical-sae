@@ -84,9 +84,9 @@ def compute_rationale_agreement(
         model_tokens = {t.lower() for t, w in attrib[:k] if w > 0}
         human_set = {t.lower() for t in human_tokens if t.strip()}
         intersection = model_tokens & human_set
-        total_precision += len(intersection) / len(model_tokens)
-        total_recall += len(intersection) / len(human_set)
+        total_precision += len(intersection) / len(model_tokens) if model_tokens else 0.0
+        total_recall += len(intersection) / len(human_set) if human_set else 0.0
 
     n = len(model_attributions)
     p, r = total_precision / n, total_recall / n
-    return 2 * p * r / (p + r)
+    return 2 * p * r / (p + r) if (p + r) > 0 else 0.0
