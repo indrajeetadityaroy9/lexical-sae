@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Protocol
 
 import numpy
+import torch
 
 
 class UnigramSampler:
@@ -27,13 +28,22 @@ class Predictor(Protocol):
     def predict_proba(self, texts: list[str]) -> list[list[float]]: ...
 
 
+class EmbeddingPredictor(Protocol):
+    """Extended predictor with embedding-level access for soft metrics."""
+    def predict_proba(self, texts: list[str]) -> list[list[float]]: ...
+    def get_embeddings(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def predict_proba_from_embeddings(
+        self, embeddings: torch.Tensor, attention_mask: torch.Tensor
+    ) -> list[list[float]]: ...
+
+
 def _top_k_tokens(attrib: list[tuple[str, float]], k: int) -> set[str]:
     seen: set[str] = set()
     result: set[str] = set()
     for token, weight in attrib:
         if weight <= 0:
             continue
-        lowered = token.lower()
+        lowered = token.lower().strip('.,!?;:"\'-')
         if lowered not in seen:
             seen.add(lowered)
             result.add(lowered)
@@ -49,7 +59,7 @@ def _mask_by_token_set(
     mode: str = "remove",
     max_fraction: float = 1.0,
 ) -> str:
-    normalized_set = {token.lstrip("#").lower() for token in token_set}
+    normalized_set = {token.strip('.,!?;:"\'-').lower() for token in token_set}
     words = text.split()
     max_masks = int(len(words) * max_fraction) if max_fraction < 1.0 else len(words)
 
@@ -90,7 +100,7 @@ def _mask_by_attribution_budget(
     for token, weight in positive_attribs:
         if cumulative >= budget:
             break
-        selected_tokens.add(token.lstrip("#").lower())
+        selected_tokens.add(token.strip('.,!?;:"\'-').lower())
         cumulative += weight
 
     return _mask_by_token_set(text, selected_tokens, mask_token, mode=mode)
@@ -352,7 +362,7 @@ def compute_filler_comprehensiveness(
     for text_index, (text, attrib) in enumerate(zip(texts, attributions)):
         for k in k_values:
             top_tokens = _top_k_tokens(attrib, k)
-            normalized = {token.lstrip("#").lower() for token in top_tokens}
+            normalized = {token.strip('.,!?;:"\'-').lower() for token in top_tokens}
             words = text.split()
             filled_words = [
                 sampler.sample() if word.lower().strip('.,!?;:"\'-') in normalized else word
@@ -373,10 +383,21 @@ def compute_filler_comprehensiveness(
     return {k: float(numpy.mean(scores)) for k, scores in results.items()}
 
 
+def _clean_subword(token: str) -> str:
+    """Strip subword markers from any tokenizer family."""
+    if token.startswith("##"):
+        return token[2:]
+    if token.startswith("\u2581"):
+        return token[1:]
+    if token.startswith("\u0120"):
+        return token[1:]
+    return token
+
+
 def _build_word_importance_map(text: str, attrib: list[tuple[str, float]]) -> dict[int, float]:
     attrib_dict: dict[str, float] = {}
     for token, weight in attrib:
-        key = token.lstrip("#").lower()
+        key = _clean_subword(token).lower()
         if key not in attrib_dict:
             attrib_dict[key] = abs(weight)
 
@@ -388,101 +409,190 @@ def _build_word_importance_map(text: str, attrib: list[tuple[str, float]]) -> di
     return word_importance
 
 
+def _build_token_importances(
+    text: str,
+    attrib: list[tuple[str, float]],
+    tokenizer,
+    max_length: int,
+) -> numpy.ndarray:
+    """Map word-level attributions to subword-token-level importances.
+
+    Returns an array of shape (max_length,) with normalized importances
+    aligned to the tokenizer's subword positions. Special tokens get 0.
+    """
+    word_importance = _build_word_importance_map(text, attrib)
+    words = text.split()
+
+    # Tokenize with offset mapping to find subword → word alignment
+    encoding = tokenizer(
+        text, max_length=max_length, padding="max_length",
+        truncation=True, return_offsets_mapping=True,
+    )
+    offsets = encoding["offset_mapping"]
+    input_ids = encoding["input_ids"]
+
+    # Build character-position → word-index map
+    char_to_word: dict[int, int] = {}
+    pos = 0
+    for word_idx, word in enumerate(words):
+        start = text.find(word, pos)
+        if start == -1:
+            continue
+        for c in range(start, start + len(word)):
+            char_to_word[c] = word_idx
+        pos = start + len(word)
+
+    importances = numpy.zeros(len(input_ids), dtype=numpy.float64)
+    for tok_idx, (start, end) in enumerate(offsets):
+        if start == 0 and end == 0:
+            continue  # special token
+        mid = (start + end) // 2
+        word_idx = char_to_word.get(mid)
+        if word_idx is not None and word_idx in word_importance:
+            importances[tok_idx] = word_importance[word_idx]
+
+    max_imp = importances.max()
+    if max_imp > 0:
+        importances = importances / max_imp
+    return importances
+
+
 def compute_soft_comprehensiveness(
-    model: Predictor,
+    model: EmbeddingPredictor,
     texts: list[str],
     attributions: list[list[tuple[str, float]]],
     mask_token: str,
     n_samples: int = 20,
     seed: int = 42,
+    tokenizer=None,
+    max_length: int = 128,
 ) -> float:
-    """Monte Carlo comprehensiveness under probabilistic masking."""
+    """Embedding-level Bernoulli dropout comprehensiveness (arXiv:2305.10496, Eq. 4).
+
+    For each token position i, each embedding dimension is independently zeroed
+    with probability a_i (the normalized attribution), then re-scored. The baseline
+    is a zero-tensor forward pass (empty rationale).
+    """
     rng = numpy.random.default_rng(seed)
-    original_probabilities = model.predict_proba(texts)
+    original_probs = model.predict_proba(texts)
 
-    all_masked_texts = []
-    meta = []
+    # Get embeddings for all texts at once
+    embeddings, attention_masks = model.get_embeddings(texts)
+    embed_dim = embeddings.shape[-1]
 
-    for text_index, (text, attrib, original_probability) in enumerate(zip(texts, attributions, original_probabilities)):
-        predicted_class = int(numpy.argmax(original_probability))
-        word_importance = _build_word_importance_map(text, attrib)
-        words = text.split()
-        if not words:
-            continue
+    # Zero-tensor baseline (arXiv:2305.10496, §3.2)
+    zero_emb = torch.zeros_like(embeddings)
+    baseline_probs = model.predict_proba_from_embeddings(zero_emb, attention_masks)
 
-        importances = numpy.array([word_importance.get(index, 0.0) for index in range(len(words))])
-        max_importance = importances.max()
-        if max_importance > 0:
-            importances = importances / max_importance
+    scores = []
+    for text_idx in range(len(texts)):
+        if tokenizer is not None:
+            token_importances = _build_token_importances(
+                texts[text_idx], attributions[text_idx], tokenizer, max_length
+            )
+        else:
+            # Fallback: uniform zero (no attribution info at token level)
+            seq_len = embeddings.shape[1]
+            token_importances = numpy.zeros(seq_len)
+
+        predicted_class = int(numpy.argmax(original_probs[text_idx]))
+        orig_conf = original_probs[text_idx][predicted_class]
+        base_conf = baseline_probs[text_idx][predicted_class]
+
+        drops = []
+        emb_i = embeddings[text_idx]  # [L, H]
+        mask_i = attention_masks[text_idx].unsqueeze(0)  # [1, L]
 
         for _ in range(n_samples):
-            mask_flags = rng.random(len(words)) < importances
-            masked_words = [mask_token if mask_flags[index] else words[index] for index in range(len(words))]
-            all_masked_texts.append(" ".join(masked_words))
-            meta.append((text_index, predicted_class))
+            # Per-dimension Bernoulli: zero out dimension j of token i with P=a_i
+            keep_mask = torch.ones_like(emb_i)
+            for tok_idx in range(min(len(token_importances), emb_i.shape[0])):
+                imp = token_importances[tok_idx]
+                if imp > 0:
+                    dim_keep = torch.from_numpy(
+                        (rng.random(embed_dim) >= imp).astype(numpy.float32)
+                    ).to(emb_i.device)
+                    keep_mask[tok_idx] = dim_keep
 
-    if not all_masked_texts:
-        return 0.0
+            perturbed = emb_i * keep_mask
+            pert_probs = model.predict_proba_from_embeddings(
+                perturbed.unsqueeze(0), mask_i
+            )
+            drops.append(orig_conf - pert_probs[0][predicted_class])
 
-    all_probabilities = model.predict_proba(all_masked_texts)
+        # Normalize by baseline (Eq. 4)
+        raw_comp = float(numpy.mean(drops))
+        baseline_suff = 1.0 - max(0.0, orig_conf - base_conf)
+        denom = 1.0 - baseline_suff
+        scores.append(raw_comp / denom if denom > 1e-8 else 0.0)
 
-    scores_by_text: dict[int, list[float]] = {}
-    for index, (text_index, predicted_class) in enumerate(meta):
-        original_confidence = original_probabilities[text_index][predicted_class]
-        masked_confidence = all_probabilities[index][predicted_class]
-        if text_index not in scores_by_text:
-            scores_by_text[text_index] = []
-        scores_by_text[text_index].append(original_confidence - masked_confidence)
-
-    scores = [float(numpy.mean(drops)) for drops in scores_by_text.values()]
     return float(numpy.mean(scores)) if scores else 0.0
 
 
 def compute_soft_sufficiency(
-    model: Predictor,
+    model: EmbeddingPredictor,
     texts: list[str],
     attributions: list[list[tuple[str, float]]],
     mask_token: str,
     n_samples: int = 20,
     seed: int = 42,
+    tokenizer=None,
+    max_length: int = 128,
 ) -> float:
-    """Monte Carlo sufficiency under probabilistic retention."""
+    """Embedding-level Bernoulli retention sufficiency (arXiv:2305.10496, Eq. 5).
+
+    For each token position i, each embedding dimension is retained with
+    probability a_i and zeroed with probability (1 - a_i).
+    """
     rng = numpy.random.default_rng(seed)
-    original_probabilities = model.predict_proba(texts)
+    original_probs = model.predict_proba(texts)
 
-    all_masked_texts = []
-    meta = []
+    embeddings, attention_masks = model.get_embeddings(texts)
+    embed_dim = embeddings.shape[-1]
 
-    for text_index, (text, attrib, original_probability) in enumerate(zip(texts, attributions, original_probabilities)):
-        predicted_class = int(numpy.argmax(original_probability))
-        word_importance = _build_word_importance_map(text, attrib)
-        words = text.split()
-        if not words:
-            continue
+    # Zero-tensor baseline
+    zero_emb = torch.zeros_like(embeddings)
+    baseline_probs = model.predict_proba_from_embeddings(zero_emb, attention_masks)
 
-        importances = numpy.array([word_importance.get(index, 0.0) for index in range(len(words))])
-        max_importance = importances.max()
-        if max_importance > 0:
-            importances = importances / max_importance
+    scores = []
+    for text_idx in range(len(texts)):
+        if tokenizer is not None:
+            token_importances = _build_token_importances(
+                texts[text_idx], attributions[text_idx], tokenizer, max_length
+            )
+        else:
+            seq_len = embeddings.shape[1]
+            token_importances = numpy.zeros(seq_len)
+
+        predicted_class = int(numpy.argmax(original_probs[text_idx]))
+        orig_conf = original_probs[text_idx][predicted_class]
+        base_conf = baseline_probs[text_idx][predicted_class]
+
+        drops = []
+        emb_i = embeddings[text_idx]
+        mask_i = attention_masks[text_idx].unsqueeze(0)
 
         for _ in range(n_samples):
-            retain_flags = rng.random(len(words)) < importances
-            masked_words = [words[index] if retain_flags[index] else mask_token for index in range(len(words))]
-            all_masked_texts.append(" ".join(masked_words))
-            meta.append((text_index, predicted_class))
+            # Retain dimension j of token i with P=a_i, zero with P=(1-a_i)
+            retain_mask = torch.zeros_like(emb_i)
+            for tok_idx in range(min(len(token_importances), emb_i.shape[0])):
+                imp = token_importances[tok_idx]
+                if imp > 0:
+                    dim_retain = torch.from_numpy(
+                        (rng.random(embed_dim) < imp).astype(numpy.float32)
+                    ).to(emb_i.device)
+                    retain_mask[tok_idx] = dim_retain
 
-    if not all_masked_texts:
-        return 0.0
+            perturbed = emb_i * retain_mask
+            pert_probs = model.predict_proba_from_embeddings(
+                perturbed.unsqueeze(0), mask_i
+            )
+            drops.append(orig_conf - pert_probs[0][predicted_class])
 
-    all_probabilities = model.predict_proba(all_masked_texts)
+        # Normalize by baseline (Eq. 5)
+        raw_suff = 1.0 - max(0.0, float(numpy.mean(drops)))
+        baseline_suff = 1.0 - max(0.0, orig_conf - base_conf)
+        denom = 1.0 - baseline_suff
+        scores.append((raw_suff - baseline_suff) / denom if denom > 1e-8 else 0.0)
 
-    scores_by_text: dict[int, list[float]] = {}
-    for index, (text_index, predicted_class) in enumerate(meta):
-        original_confidence = original_probabilities[text_index][predicted_class]
-        masked_confidence = all_probabilities[index][predicted_class]
-        if text_index not in scores_by_text:
-            scores_by_text[text_index] = []
-        scores_by_text[text_index].append(original_confidence - masked_confidence)
-
-    scores = [float(numpy.mean(drops)) for drops in scores_by_text.values()]
     return float(numpy.mean(scores)) if scores else 0.0

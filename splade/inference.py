@@ -4,7 +4,6 @@ import numpy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from splade.utils.cuda import DEVICE
-from splade.models.splade import splade_aggregate
 
 SPECIAL_TOKENS = {"[CLS]", "[SEP]", "[UNK]", "[MASK]", "[PAD]"}
 

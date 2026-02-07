@@ -1,5 +1,6 @@
 """Benchmark execution and reporting utilities."""
 
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -69,8 +70,8 @@ def aggregate_results(results_list: list[list[InterpretabilityResult]]) -> list[
         
         for metric in metrics:
             vals = [getattr(s, metric) for s in method_seeds]
-            stats[f"{metric}_mean"] = float(numpy.mean(vals))
-            stats[f"{metric}_std"] = float(numpy.std(vals))
+            stats[f"{metric}_mean"] = float(numpy.nanmean(vals))
+            stats[f"{metric}_std"] = float(numpy.nanstd(vals))
 
         # Handle k-dependent dicts (taking first k for simplicity in summary)
         k_val = list(method_seeds[0].comprehensiveness.keys())[len(method_seeds[0].comprehensiveness)//2]
@@ -178,12 +179,15 @@ def print_interpretability_results(results: list[InterpretabilityResult], config
     print("\n" + "=" * 80)
     print("WINNER ANALYSIS")
     print("=" * 80)
-    best_naopc = max(results, key=lambda result: result.naopc)
-    best_filler = max(results, key=lambda result: result.filler_comprehensiveness.get(k_display, 0.0))
-    best_mono = max(results, key=lambda result: result.monotonicity)
-    best_causal = max(results, key=lambda result: result.causal_faithfulness)
-    best_comp = max(results, key=lambda result: result.comprehensiveness.get(k_display, 0.0))
-    best_soft_comp = max(results, key=lambda result: result.soft_comprehensiveness)
+    def _safe_key(val):
+        return val if not math.isnan(val) else float('-inf')
+
+    best_naopc = max(results, key=lambda result: _safe_key(result.naopc))
+    best_filler = max(results, key=lambda result: _safe_key(result.filler_comprehensiveness.get(k_display, 0.0)))
+    best_mono = max(results, key=lambda result: _safe_key(result.monotonicity))
+    best_causal = max(results, key=lambda result: _safe_key(result.causal_faithfulness))
+    best_comp = max(results, key=lambda result: _safe_key(result.comprehensiveness.get(k_display, 0.0)))
+    best_soft_comp = max(results, key=lambda result: _safe_key(result.soft_comprehensiveness))
 
     print(f"  Best NAOPC: {best_naopc.name}")
     print(f"  Best Filler Comp@{k_display}: {best_filler.name}")
@@ -204,6 +208,7 @@ def benchmark_explainer(
     sampler: UnigramSampler | None = None,
     ftuned_clf=None,
     tokenizer=None,
+    max_length: int = 128,
 ) -> InterpretabilityResult:
     """Evaluate one explainer on the configured metric suite."""
     k_values = list(config.k_values)
@@ -282,7 +287,7 @@ def benchmark_explainer(
             k_values,
             mask_token,
             beta=config.ffidelity_beta,
-            beta_mode="attribution_mass",
+            beta_mode="token_fraction",
         )
         result.ffidelity_suff = compute_sufficiency(
             ftuned_clf,
@@ -291,7 +296,7 @@ def benchmark_explainer(
             k_values,
             mask_token,
             beta=config.ffidelity_beta,
-            beta_mode="attribution_mass",
+            beta_mode="token_fraction",
         )
 
     if sampler is not None:
@@ -310,6 +315,8 @@ def benchmark_explainer(
         mask_token,
         n_samples=config.soft_metric_n_samples,
         seed=config.seed,
+        tokenizer=tokenizer,
+        max_length=max_length,
     )
     result.soft_sufficiency = compute_soft_sufficiency(
         clf,
@@ -318,6 +325,8 @@ def benchmark_explainer(
         mask_token,
         n_samples=config.soft_metric_n_samples,
         seed=config.seed,
+        tokenizer=tokenizer,
+        max_length=max_length,
     )
 
     if tokenizer is not None:
@@ -342,35 +351,10 @@ def benchmark_explainer(
     result.adversarial_mean_tau = adv_result["mean_tau"]
     
     # Causal Metric (Counterfactual Consistency)
-    if config.enable_causal_metric and tokenizer is not None:
-        # Assuming clf is the model/predictor.
-        # But compute_causal_faithfulness needs (model, tokenizer, ...).
-        # clf here is the PredictorWrapper which has .model and .tokenizer?
-        # Yes, based on scripts/eval.py
-        
-        # We need raw attributions (not normalized) usually, but the function asks for list[tuple[str, float]].
-        # It handles normalization internally if we pass raw or normalized?
-        # Let's check compute_causal_faithfulness implementation.
-        # It uses predict_proba_model.
-        
-        # We need access to underlying model and tokenizer.
-        # clf is PredictorWrapper in our eval script.
-        if hasattr(clf, 'model') and hasattr(clf, 'tokenizer'):
-             # We use attributions (already normalized) because we want to test if the EXPLANATION (which is words) aligns with causal shift.
-             # The function `compute_causal_faithfulness` logic finds the word in text.
-             result.causal_faithfulness = compute_causal_faithfulness(
-                 clf.model, 
-                 clf.tokenizer, 
-                 test_texts, 
-                 attributions, 
-                 max_length=128 # HACK: Hardcoded or infer from config? 
-                 # BenchmarkConfig doesn't have max_length. 
-                 # We should add max_length to EvaluationConfig or infer.
-                 # Let's assume 128 or better yet, check if PredictorWrapper has max_length.
-             )
-             if hasattr(clf, 'max_length'):
-                 result.causal_faithfulness = compute_causal_faithfulness(
-                     clf.model, clf.tokenizer, test_texts, attributions, clf.max_length
-                 )
+    if config.enable_causal_metric:
+        if hasattr(clf, 'model') and hasattr(clf, 'tokenizer') and hasattr(clf, 'max_length'):
+            result.causal_faithfulness = compute_causal_faithfulness(
+                clf.model, clf.tokenizer, test_texts, attributions, clf.max_length
+            )
 
     return result

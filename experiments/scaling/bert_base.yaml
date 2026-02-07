@@ -1,21 +1,20 @@
-experiment_name: "sensitivity_seed_sweep"
-output_dir: "results/sensitivity/seed_sweep"
+experiment_name: "scaling_bert_base"
+output_dir: "results/scaling/bert_base"
 
 data:
   dataset_name: "sst2"
   train_samples: 2000
   test_samples: 200
-  num_labels: 2
   max_length: 128
 
 model:
-  name: "distilbert-base-uncased"
+  name: "bert-base-uncased"
   regularization: "df_flops"
   compile: true
   compile_mode: "max-autotune"
 
 training:
-  batch_size: 64
+  batch_size: 32
   max_epochs: 20
   patience: 3
   seed: 42
@@ -28,7 +27,8 @@ training:
 
 evaluation:
   batch_size: 32
-  seeds: [42, 1337, 7]
+  explainers: ["splade", "random", "lime", "ig"]
+  seeds: [42]
   k_values: [1, 5, 10, 20]
   ffidelity_beta: 0.1
   ffidelity_ft_epochs: 30

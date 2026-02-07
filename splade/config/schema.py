@@ -12,6 +12,7 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     name: str = "distilbert-base-uncased"
+    regularization: str = "df_flops"
     compile: bool = True
     compile_mode: str = "max-autotune"
 
@@ -35,9 +36,12 @@ class EvaluationConfig:
     batch_size: int = 32
     seeds: List[int] = field(default_factory=lambda: [42])
     k_values: List[int] = field(default_factory=lambda: [1, 5, 10, 20])
-    ffidelity_beta: float = 0.5
-    ffidelity_ft_epochs: int = 3
-    ffidelity_ft_lr: float = 1e-5
+    explainers: List[str] = field(default_factory=lambda: ["splade", "random"])
+    lime_num_samples: int = 500
+    ig_n_steps: int = 50
+    ffidelity_beta: float = 0.1
+    ffidelity_ft_epochs: int = 30
+    ffidelity_ft_lr: float = 1e-4
     ffidelity_ft_batch_size: int = 16
     monotonicity_steps: int = 10
     naopc_beam_size: int = 15
@@ -45,8 +49,10 @@ class EvaluationConfig:
     adversarial_mcp_threshold: float = 0.7
     adversarial_max_changes: int = 3
     adversarial_test_samples: int = 50
-    ig_n_steps: int = 50
-    lime_num_samples: int = 500
+    k_max: int = 20
+    k_display: int = 10
+    seed: int = 42
+    enable_causal_metric: bool = True
 
 @dataclass
 class Config:

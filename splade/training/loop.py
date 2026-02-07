@@ -42,6 +42,8 @@ def train_model(
     training_config: TrainingConfig,
     model_config: ModelConfig,
     data_config: DataConfig,
+    val_texts: list[str] | None = None,
+    val_labels: list[int] | None = None,
 ) -> None:
     _validate_texts(texts)
     if len(texts) != len(labels):
@@ -80,22 +82,32 @@ def train_model(
     else:
         vocab_size = model.vocab_size
 
-    df_tracker = DocumentFrequencyTracker(vocab_size=vocab_size, device=DEVICE)
+    use_df_flops = model_config.regularization == "df_flops"
+    df_tracker = DocumentFrequencyTracker(vocab_size=vocab_size, device=DEVICE) if use_df_flops else None
     early_stopping = _EarlyStopping(patience=training_config.patience)
+
+    # NFNet (arXiv:2102.06171 §4.1): skip final linear layer from AGC
+    _orig = model._orig_mod if hasattr(model, "_orig_mod") else model
+    classifier_params = set(_orig.classifier.parameters())
 
     label_tensor = torch.tensor(
         labels,
         dtype=torch.float32 if num_labels == 1 else torch.long,
     )
     encoding = tokenize_batch(texts, tokenizer, data_config.max_length)
+    worker_kwargs = {}
+    if training_config.num_workers > 0:
+        worker_kwargs = dict(
+            num_workers=training_config.num_workers,
+            prefetch_factor=training_config.prefetch_factor,
+            persistent_workers=True,
+        )
     loader = DataLoader(
         TensorDataset(encoding["input_ids"], encoding["attention_mask"], label_tensor),
         batch_size=batch_size,
         shuffle=True,
-        num_workers=training_config.num_workers,
         pin_memory=True,
-        prefetch_factor=training_config.prefetch_factor,
-        persistent_workers=True,
+        **worker_kwargs,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr)
     criterion = (
@@ -103,12 +115,13 @@ def train_model(
         if num_labels == 1
         else torch.nn.CrossEntropyLoss()
     )
-    scaler = torch.amp.GradScaler(AUTOCAST_DEVICE_TYPE)
+    use_scaler = AUTOCAST_ENABLED and COMPUTE_DTYPE == torch.float16
+    scaler = torch.amp.GradScaler(AUTOCAST_DEVICE_TYPE, enabled=use_scaler)
 
     model.train()
     for epoch_index in range(epoch_count):
-        # SOTA: Always use DF-FLOPS
-        df_tracker.reset()
+        if df_tracker is not None:
+            df_tracker.soft_reset(momentum=0.9)
         total_loss = 0.0
         batch_count = 0
         for batch_ids, batch_mask, batch_labels in tqdm(loader, desc=f"Epoch {epoch_index + 1}/{epoch_count}"):
@@ -130,24 +143,22 @@ def train_model(
                     else criterion(logits, batch_labels.view(-1))
                 )
                 
-                # SOTA Path: DF-FLOPS
-                df_tracker.update(sparse)
-                df_weights = df_tracker.get_weights(
-                    alpha=training_config.df_alpha, 
-                    beta=training_config.df_beta
-                )
+                if use_df_flops:
+                    df_tracker.update(sparse)
+                    df_weights = df_tracker.get_weights(
+                        alpha=training_config.df_alpha,
+                        beta=training_config.df_beta,
+                    )
+                else:
+                    df_weights = torch.ones(vocab_size, device=DEVICE)
                 regularization_loss = DFFlopsRegFunction.apply(sparse, df_weights)
                 
-                regularization_weight = lambda_schedule.compute_lambda(
-                    sparse,
-                    classification_loss.item(),
-                    regularization_loss.item(),
-                )
+                regularization_weight = lambda_schedule.compute_lambda(sparse)
                 loss = classification_loss + regularization_weight * regularization_loss
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            _adaptive_gradient_clip(model, clip_factor=training_config.clip_factor)
+            _adaptive_gradient_clip(model, clip_factor=training_config.clip_factor, skip_params=classifier_params)
             scaler.step(optimizer)
             scaler.update()
 
@@ -157,13 +168,38 @@ def train_model(
         average_loss = total_loss / batch_count
         sparsity = lambda_schedule._current_sparsity
         epoch_msg = f"Epoch {epoch_index + 1}: Loss = {average_loss:.4f}, Sparsity: {sparsity:.2%}"
-        
-        # SOTA Path: Always report DF stats
-        stats = df_tracker.get_stats()
-        epoch_msg += f", Top-1 DF: {stats['top1_df_pct']:.1f}%"
+
+        if df_tracker is not None:
+            stats = df_tracker.get_stats()
+            epoch_msg += f", Top-1 DF: {stats['top1_df_pct']:.1f}%"
+
+        # Validation-based early stopping when validation data is provided
+        if val_texts is not None and val_labels is not None:
+            model.eval()
+            val_encoding = tokenize_batch(val_texts, tokenizer, data_config.max_length)
+            val_label_tensor = torch.tensor(
+                val_labels,
+                dtype=torch.float32 if num_labels == 1 else torch.long,
+            ).to(DEVICE)
+            val_ids = val_encoding["input_ids"].to(DEVICE)
+            val_mask = val_encoding["attention_mask"].to(DEVICE)
+            with torch.inference_mode():
+                with torch.amp.autocast(AUTOCAST_DEVICE_TYPE, dtype=COMPUTE_DTYPE, enabled=AUTOCAST_ENABLED):
+                    val_logits, _ = model(val_ids, val_mask)
+                    val_loss = (
+                        criterion(val_logits.squeeze(-1), val_label_tensor)
+                        if num_labels == 1
+                        else criterion(val_logits, val_label_tensor.view(-1))
+                    )
+            stop_loss = val_loss.item()
+            epoch_msg += f", Val Loss: {stop_loss:.4f}"
+            model.train()
+        else:
+            stop_loss = average_loss
+
         print(epoch_msg)
 
-        if early_stopping.step(average_loss, model):
+        if early_stopping.step(stop_loss, model):
             model.load_state_dict(early_stopping.best_state)
             print(f"Early stopping at epoch {epoch_index + 1}")
             break

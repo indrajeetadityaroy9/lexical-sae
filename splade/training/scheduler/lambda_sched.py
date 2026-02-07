@@ -15,15 +15,16 @@ class SatLinearSchedule:
         self._step = 0
         self._current_sparsity = 0.0
 
-    def compute_lambda(self, activations: torch.Tensor, cls_loss: float, reg_loss: float) -> float:
+    def compute_lambda(self, activations: torch.Tensor) -> float:
         with torch.no_grad():
             self._current_sparsity = (
                 (activations.abs() < 1e-6).float().mean().item()
             )
-            
+
+        current_step = self._step
         self._step += 1
-        if self._step < self.warmup_steps:
-            return 0.0 # Dense phase
-        
-        progress = (self._step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
+        if current_step < self.warmup_steps:
+            return 0.0  # Dense phase
+
+        progress = (current_step - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
         return self.final_lambda * min(1.0, progress)

@@ -3,7 +3,6 @@
 import math
 import torch
 from transformers import AutoConfig
-from splade.training.scheduler.lambda_sched import get_schedule # Forward import
 
 def _compute_base_lr(model_name: str) -> float:
     config = AutoConfig.from_pretrained(model_name)
@@ -13,15 +12,34 @@ def _adaptive_gradient_clip(
     model: torch.nn.Module,
     clip_factor: float = 0.01,
     eps: float = 1e-3,
+    skip_params: set | None = None,
 ) -> None:
     for parameter in model.parameters():
         if parameter.grad is None:
             continue
-        parameter_norm = parameter.data.norm(2)
-        gradient_norm = parameter.grad.data.norm(2)
-        max_norm = parameter_norm * clip_factor + eps
-        if gradient_norm > max_norm:
-            parameter.grad.data.mul_(max_norm / (gradient_norm + 1e-8))
+        if skip_params is not None and any(parameter is p for p in skip_params):
+            continue
+        if parameter.data.ndim >= 2:
+            # Unit-wise: per output-unit (row) norms — NFNet (arXiv:2102.06171)
+            p_flat = parameter.data.reshape(parameter.data.shape[0], -1)
+            g_flat = parameter.grad.data.reshape(parameter.grad.data.shape[0], -1)
+            p_norms = p_flat.norm(2, dim=1)
+            g_norms = g_flat.norm(2, dim=1)
+            max_norms = torch.clamp(p_norms, min=eps) * clip_factor
+            clip_mask = g_norms > max_norms
+            if clip_mask.any():
+                scale = max_norms / (g_norms + 1e-8)
+                scale = torch.where(clip_mask, scale, torch.ones_like(scale))
+                parameter.grad.data.mul_(
+                    scale.view(parameter.data.shape[0], *([1] * (parameter.data.ndim - 1)))
+                )
+        else:
+            # 1D (biases, LayerNorm): full-parameter norm
+            p_norm = parameter.data.norm(2)
+            g_norm = parameter.grad.data.norm(2)
+            max_norm = torch.clamp(p_norm, min=eps) * clip_factor
+            if g_norm > max_norm:
+                parameter.grad.data.mul_(max_norm / (g_norm + 1e-8))
 
 class _LRScheduler:
     def __init__(self, base_lr: float, total_steps: int, warmup_steps: int):

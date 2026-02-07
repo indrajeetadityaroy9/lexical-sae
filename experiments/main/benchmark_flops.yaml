@@ -30,9 +30,9 @@ evaluation:
   batch_size: 32
   seeds: [42]
   k_values: [1, 5, 10, 20]
-  ffidelity_beta: 0.5
-  ffidelity_ft_epochs: 3
-  ffidelity_ft_lr: 1.0e-5
+  ffidelity_beta: 0.1
+  ffidelity_ft_epochs: 30
+  ffidelity_ft_lr: 1.0e-4
   ffidelity_ft_batch_size: 16
   monotonicity_steps: 10
   naopc_beam_size: 15
@@ -40,5 +40,3 @@ evaluation:
   adversarial_mcp_threshold: 0.7
   adversarial_max_changes: 3
   adversarial_test_samples: 50
-  ig_n_steps: 50
-  lime_num_samples: 500

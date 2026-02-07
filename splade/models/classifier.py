@@ -66,7 +66,7 @@ class SPLADEClassifier(BaseEstimator, ClassifierMixin):
         X: list[str], 
         y: list[int], 
         validation_data: Optional[tuple[list[str], list[int]]] = None,
-        epochs: int = 3,
+        epochs: int = 20,
         learning_rate: float = 2e-5,
         regularization: str = "df_flops",
         lambda_q: float = 0.1,
@@ -85,50 +85,38 @@ class SPLADEClassifier(BaseEstimator, ClassifierMixin):
             lambda_q: Regularization strength.
         """
         self._ensure_initialized()
-        
-        # Construct config objects on the fly to reuse existing training loop
-        # This is a lightweight shim to bridge sklearn API with the config-driven training
-        from argparse import Namespace
-        
-        # Mocking config structures expected by train_model
-        training_config = Namespace(
-            epochs=epochs,
-            batch_size=self.batch_size,
-            lr=learning_rate,
-            seed=self.seed,
-            regularization=regularization,
-            lambda_q=lambda_q,
-            warmup_steps=kwargs.get("warmup_steps", 100),
-            gradient_clipping=1.0,
-            lambda_warmup_steps=kwargs.get("lambda_warmup_steps", 0),
-            early_stopping_patience=kwargs.get("patience", 3)
-        )
-        
-        model_config = Namespace(
-            name=self.model_name,
-            compile=self.compile_model
-        )
-        
-        data_config = Namespace(
-            max_length=self.max_length,
-            num_labels=self.num_labels
-        )
 
-        # Handle validation data splitting if not provided
-        val_texts, val_labels = ([], [])
+        from splade.config.schema import TrainingConfig, ModelConfig, DataConfig
+
+        training_config = TrainingConfig(
+            batch_size=self.batch_size,
+            max_epochs=epochs,
+            patience=kwargs.get("patience", 3),
+            base_lr=learning_rate,
+            seed=self.seed,
+            warmup_steps=kwargs.get("warmup_steps", None),
+            df_alpha=kwargs.get("df_alpha", 0.1),
+            df_beta=kwargs.get("df_beta", 5.0),
+            clip_factor=kwargs.get("clip_factor", 0.01),
+            target_lambda_ratio=lambda_q,
+        )
+        model_config = ModelConfig(name=self.model_name, regularization=regularization, compile=self.compile_model)
+        data_config = DataConfig(max_length=self.max_length, num_labels=self.num_labels)
+
+        val_texts, val_labels = None, None
         if validation_data:
             val_texts, val_labels = validation_data
-        
+
         train_model(
-            self.model, 
-            self.tokenizer, 
-            X, 
-            y, 
-            training_config, 
-            model_config, 
+            self.model,
+            self.tokenizer,
+            X,
+            y,
+            training_config,
+            model_config,
             data_config,
-            test_texts=val_texts,
-            test_labels=val_labels
+            val_texts=val_texts,
+            val_labels=val_labels,
         )
         return self
 
@@ -181,12 +169,13 @@ class SPLADEClassifier(BaseEstimator, ClassifierMixin):
         """Return lexical explanations for a single instance."""
         self._ensure_initialized()
         return explain_model(
-            self.model, 
-            self.tokenizer, 
-            text, 
-            self.max_length, 
-            top_k, 
-            target_class
+            self.model,
+            self.tokenizer,
+            text,
+            self.max_length,
+            top_k,
+            target_class,
+            input_only=True
         )
 
     def save(self, path: str):

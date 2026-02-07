@@ -1,8 +1,10 @@
 """Causal faithfulness metrics via MLM-driven counterfactual generation.
 
-Uses a Masked Language Model to generate contextually valid counterfactuals 
+Uses a Masked Language Model to generate contextually valid counterfactuals
 by masking salient tokens and sampling plausible alternatives.
 """
+
+import re
 
 import numpy
 import torch
@@ -77,7 +79,7 @@ class MLMCounterfactualGenerator:
                     # Simpler: replace in string if we trust the word.
                     # Or replace just the first token and drop the others?
                     # Let's simple string replace for stability.
-                    return text.replace(target_word, new_word, 1)
+                    return re.sub(r'\b' + re.escape(target_word) + r'\b', new_word, text, count=1)
                     
         return None
 
@@ -87,49 +89,40 @@ def compute_causal_faithfulness(
     texts: list[str],
     attributions: list[list[tuple[str, float]]],
     max_length: int,
+    generator: MLMCounterfactualGenerator | None = None,
+    attribution_levels: tuple[int, ...] = (1, 3, 5),
 ) -> float:
-    """
-    Compute Causal Faithfulness using MLM Counterfactuals.
-    """
-    from splade.inference import predict_proba_model 
-    
-    # Initialize generator (singleton-ish)
-    generator = MLMCounterfactualGenerator()
-    
+    """Compute Causal Faithfulness using multi-level MLM Counterfactuals + Spearman."""
+    from scipy.stats import spearmanr
+    from splade.inference import predict_proba_model
+
+    if generator is None:
+        generator = MLMCounterfactualGenerator()
+
+    original_probs = predict_proba_model(model, tokenizer, texts, max_length)
     shifts = []
     attrib_scores = []
-    
-    # Batch processing for original probabilities
-    original_probs = predict_proba_model(model, tokenizer, texts, max_length)
-    
-    valid_samples = 0
-    
+
     for i, text in enumerate(texts):
         if not attributions[i]:
             continue
-            
-        # Get top attributed token (normalized word)
-        top_token = attributions[i][0][0]
-        score = attributions[i][0][1]
-        
-        # Generate counterfactual
-        new_text = generator.generate(text, top_token)
-        
-        if new_text:
-            # Predict on new text
-            new_prob = predict_proba_model(model, tokenizer, [new_text], max_length)[0]
-            
-            # Target class of original
-            target = numpy.argmax(original_probs[i])
-            
-            # Shift magnitude
-            shift = abs(original_probs[i][target] - new_prob[target])
-            
-            shifts.append(shift)
-            attrib_scores.append(abs(score))
-            valid_samples += 1
-            
-    if valid_samples < 2:
-        return 0.0
-        
-    return float(numpy.corrcoef(attrib_scores, shifts)[0, 1])
+        target = numpy.argmax(original_probs[i])
+        for level in attribution_levels:
+            top_tokens = [(t, s) for t, s in attributions[i][:level] if s > 0]
+            if not top_tokens:
+                continue
+            avg_score = numpy.mean([abs(s) for _, s in top_tokens])
+            level_shifts = []
+            for token, _ in top_tokens:
+                new_text = generator.generate(text, token)
+                if new_text is not None:
+                    new_prob = predict_proba_model(model, tokenizer, [new_text], max_length)[0]
+                    level_shifts.append(abs(original_probs[i][target] - new_prob[target]))
+            if level_shifts:
+                shifts.append(numpy.mean(level_shifts))
+                attrib_scores.append(avg_score)
+
+    if len(shifts) < 3:
+        return float('nan')
+    corr, _ = spearmanr(attrib_scores, shifts)
+    return float(corr) if not numpy.isnan(corr) else float('nan')

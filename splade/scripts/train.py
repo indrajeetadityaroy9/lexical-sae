@@ -39,7 +39,8 @@ def main() -> None:
     if config.model.compile:
         model = torch.compile(model, mode=config.model.compile_mode)
 
-    train_model(model, tokenizer, train_texts, train_labels, config.training, config.model, config.data)
+    train_model(model, tokenizer, train_texts, train_labels, config.training, config.model, config.data,
+                val_texts=test_texts, val_labels=test_labels)
 
     accuracy = score_model(
         model, 

@@ -1,13 +1,15 @@
-"""Activation functions including dReLU for Turbo Sparse."""
+"""Activation functions for SPLADE sparse representations."""
 
 import torch
 import torch.nn as nn
 
 class DReLU(nn.Module):
-    """Dynamic ReLU (dReLU) with learnable threshold for hard sparsity.
-    
-    f(x) = max(0, x - theta) where theta is a learnable parameter.
-    Used in Turbo Sparse / SPLADE v3 to enforce true 0s for inference efficiency.
+    """Shifted ReLU with learnable threshold for hard sparsity.
+
+    f(x) = max(0, x - theta) where theta is a learnable per-dimension parameter.
+    Promotes exact zeros in sparse representations by raising the activation floor.
+    Note: This is distinct from Turbo Sparse's DReLU (arXiv:2406.05955) which uses
+    a gated dual-ReLU for decoder LLMs.
     """
     def __init__(self, input_dim: int):
         super().__init__()

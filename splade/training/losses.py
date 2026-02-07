@@ -42,6 +42,11 @@ class DocumentFrequencyTracker:
         self.df_counts.zero_()
         self.doc_count = 0
 
+    def soft_reset(self, momentum: float = 0.9) -> None:
+        """Decay counts instead of zeroing — stabilizes early-epoch DF estimates."""
+        self.df_counts *= momentum
+        self.doc_count = int(self.doc_count * momentum)
+
 class DFFlopsRegFunction(torch.autograd.Function):
     """Autograd function for DF-weighted FLOPS regularization."""
 

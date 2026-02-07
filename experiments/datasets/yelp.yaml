@@ -1,12 +1,11 @@
-experiment_name: "sensitivity_seed_sweep"
-output_dir: "results/sensitivity/seed_sweep"
+experiment_name: "dataset_yelp"
+output_dir: "results/datasets/yelp"
 
 data:
-  dataset_name: "sst2"
+  dataset_name: "yelp"
   train_samples: 2000
   test_samples: 200
-  num_labels: 2
-  max_length: 128
+  max_length: 256
 
 model:
   name: "distilbert-base-uncased"
@@ -15,7 +14,7 @@ model:
   compile_mode: "max-autotune"
 
 training:
-  batch_size: 64
+  batch_size: 32
   max_epochs: 20
   patience: 3
   seed: 42
@@ -28,7 +27,8 @@ training:
 
 evaluation:
   batch_size: 32
-  seeds: [42, 1337, 7]
+  explainers: ["splade", "random", "lime", "ig"]
+  seeds: [42]
   k_values: [1, 5, 10, 20]
   ffidelity_beta: 0.1
   ffidelity_ft_epochs: 30

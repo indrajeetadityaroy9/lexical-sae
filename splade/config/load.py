@@ -1,3 +1,5 @@
+import warnings
+
 import yaml
 import os
 from splade.config.schema import Config, DataConfig, ModelConfig, TrainingConfig, EvaluationConfig
@@ -21,6 +23,9 @@ def load_config(path: str) -> Config:
         # Filter keys that are not in the dataclass
         valid_keys = set(cls.__annotations__.keys())
         filtered = {k: v for k, v in data.items() if k in valid_keys}
+        unknown = set(data.keys()) - valid_keys
+        if unknown:
+            warnings.warn(f"Unknown config keys in {cls.__name__}: {unknown}")
         return cls(**filtered)
 
     return Config(
