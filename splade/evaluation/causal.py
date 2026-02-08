@@ -1,28 +1,24 @@
-"""Causal faithfulness metrics via MLM-driven counterfactual generation.
-
-Uses a Masked Language Model to generate contextually valid counterfactuals
-by masking salient tokens and sampling plausible alternatives.
-"""
-
 import re
 from collections import defaultdict
 
 import numpy
 import torch
 import torch.nn.functional as F
+from scipy.stats import spearmanr
 from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+from splade.inference import predict_proba_model
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
 
+
 class MLMCounterfactualGenerator:
-    """Generates counterfactuals using a Masked Language Model."""
-    
+
     def __init__(self, model_name: str = "distilbert-base-uncased"):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForMaskedLM.from_pretrained(model_name, attn_implementation="sdpa").to(DEVICE)
         self.model.eval()
 
     def generate(self, text: str, target_word: str, top_k: int = 5) -> str | None:
-        """Replace `target_word` with a contextually plausible MLM-predicted alternative."""
         word_tokens = self.tokenizer.encode(target_word, add_special_tokens=False)
         if not word_tokens:
             return None
@@ -30,7 +26,6 @@ class MLMCounterfactualGenerator:
         inputs = self.tokenizer(text, return_tensors="pt").to(DEVICE)
         input_ids = inputs["input_ids"][0]
 
-        # Sliding window search for the subword sequence
         seq_len = len(word_tokens)
         match_idx = -1
         word_tensor = torch.tensor(word_tokens, device=DEVICE)
@@ -42,11 +37,9 @@ class MLMCounterfactualGenerator:
         if match_idx == -1:
             return None
 
-        # Mask all tokens of the target word
         masked_input_ids = input_ids.clone()
         masked_input_ids[match_idx : match_idx + seq_len] = self.tokenizer.mask_token_id
 
-        # Predict at each masked position independently
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
             outputs = self.model(masked_input_ids.unsqueeze(0))
             replacement_ids = []
@@ -55,7 +48,6 @@ class MLMCounterfactualGenerator:
                 logits = outputs.logits[0, pos]
                 probs = F.softmax(logits, dim=-1)
                 top_ids = torch.topk(probs, k=top_k + 1).indices
-                # Pick the best token that differs from the original at this position
                 chosen = top_ids[0]
                 for tid in top_ids:
                     if tid.item() != word_tokens[offset]:
@@ -75,20 +67,12 @@ def compute_causal_faithfulness(
     texts: list[str],
     attributions: list[list[tuple[str, float]]],
     max_length: int,
-    generator: MLMCounterfactualGenerator | None = None,
+    generator: MLMCounterfactualGenerator,
     attribution_levels: tuple[int, ...] = (1, 3, 5),
 ) -> float:
-    """Compute Causal Faithfulness using multi-level MLM Counterfactuals + Spearman."""
-    from scipy.stats import spearmanr
-    from splade.inference import predict_proba_model
-
-    if generator is None:
-        generator = MLMCounterfactualGenerator()
-
     original_probs = predict_proba_model(model, tokenizer, texts, max_length)
 
-    # Phase 1: Generate all counterfactuals, collecting texts for batched prediction
-    counterfactual_tasks = []  # (text_idx, level, target_class, avg_score, cf_text)
+    counterfactual_tasks = []
     for i, text in enumerate(texts):
         if not attributions[i]:
             continue
@@ -106,11 +90,9 @@ def compute_causal_faithfulness(
     if not counterfactual_tasks:
         return float('nan')
 
-    # Phase 2: Batch predict all counterfactual texts at once
     cf_texts = [task[4] for task in counterfactual_tasks]
     all_cf_probs = predict_proba_model(model, tokenizer, cf_texts, max_length)
 
-    # Phase 3: Aggregate shifts per (text_idx, level)
     level_data = defaultdict(lambda: {"shifts": [], "avg_score": 0.0})
     for task_idx, (text_idx, level, target, avg_score, _) in enumerate(counterfactual_tasks):
         key = (text_idx, level)

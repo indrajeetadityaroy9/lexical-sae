@@ -1,24 +1,13 @@
-"""Adversarial sensitivity metrics for explanation rankings."""
-
 import random
 import string
 from functools import lru_cache
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable
 
 import numpy
 from nltk.corpus import wordnet
 
-from splade.evaluation.faithfulness import Predictor
-
-
-@runtime_checkable
-class AttackStrategy(Protocol):
-    def attack(self, text: str, rng: random.Random) -> str: ...
-
 
 class WordNetAttack:
-    """Synonym substitution via WordNet."""
-
     def __init__(self, max_changes: int = 3):
         self.max_changes = max_changes
 
@@ -43,9 +32,7 @@ class WordNetAttack:
 
 
 class TextFoolerAttack:
-    """Leave-one-out ranking followed by synonym replacement."""
-
-    def __init__(self, model: Predictor, max_changes: int = 3):
+    def __init__(self, model, max_changes: int = 3):
         self.model = model
         self.max_changes = max_changes
 
@@ -58,7 +45,6 @@ class TextFoolerAttack:
         predicted_class = int(numpy.argmax(original_probabilities))
         original_confidence = original_probabilities[predicted_class]
 
-        # Batch all leave-one-out texts into a single predict_proba call
         reduced_texts = []
         reduced_indices = []
         for index in range(len(words)):
@@ -101,8 +87,6 @@ class TextFoolerAttack:
 
 
 class CharacterAttack:
-    """Character-level perturbations: swap, insert, delete."""
-
     def __init__(self, max_changes: int = 3):
         self.max_changes = max_changes
 
@@ -143,7 +127,6 @@ def _kendall_tau_hat(
     ranking_a: list[tuple[str, float]],
     ranking_b: list[tuple[str, float]],
 ) -> float:
-    """Generalized Kendall tau for incomplete rankings."""
     all_items = list({token.lower() for token, _ in ranking_a} | {token.lower() for token, _ in ranking_b})
     item_count = len(all_items)
     if item_count < 2:
@@ -175,7 +158,6 @@ def _kendall_tau_hat(
 
 @lru_cache(maxsize=4096)
 def _get_wordnet_synonyms(word: str) -> list[str]:
-    """Fetch single-word synonyms from WordNet."""
     synonyms = set()
     for synset in wordnet.synsets(word):
         for lemma in synset.lemmas():
@@ -186,22 +168,18 @@ def _get_wordnet_synonyms(word: str) -> list[str]:
 
 
 def compute_adversarial_sensitivity(
-    model: Predictor,
+    model,
     explainer_fn: Callable[[str, int], list[tuple[str, float]]],
     texts: list[str],
-    attacks: list[AttackStrategy] | None,
+    attacks: list,
     max_changes: int,
     mcp_threshold: float,
     top_k: int,
     seed: int,
-    original_probs: list[list[float]] | None = None,
+    original_probs: list[list[float]],
 ) -> dict:
-    """Measure ranking instability under one or more attacks."""
-    if attacks is None:
-        attacks = [WordNetAttack(max_changes)]
-
     rng = random.Random(seed)
-    original_probabilities = original_probs if original_probs is not None else model.predict_proba(texts)
+    original_probabilities = original_probs
     filtered_texts = [
         text
         for text, probabilities in zip(texts, original_probabilities)

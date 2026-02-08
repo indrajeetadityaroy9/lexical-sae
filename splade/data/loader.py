@@ -1,5 +1,3 @@
-"""Dataset loading and data-driven inference utilities."""
-
 import random
 
 import numpy
@@ -16,19 +14,12 @@ def _shuffle_and_truncate(
 
 
 def infer_max_length(texts: list[str], tokenizer) -> int:
-    """Infer sequence length from the 99th percentile of token counts.
-
-    Samples up to 500 texts for speed, rounds up to a multiple of 8 for
-    Tensor Core alignment, and clamps to [64, 512].
-    """
     sample = texts[:500]
     lengths = [len(tokenizer.encode(t, add_special_tokens=True)) for t in sample]
     p99 = int(numpy.percentile(lengths, 99))
     aligned = ((p99 + 7) // 8) * 8
     return max(64, min(512, aligned))
 
-
-# --- SST-2 (2-class sentiment) ---
 
 def _load_sst2_split(split: str, max_samples: int, seed: int) -> tuple[list[str], list[int]]:
     dataset = load_dataset("glue", "sst2", split=split)
@@ -47,8 +38,6 @@ def load_sst2_data(
     return train_texts, train_labels, test_texts, test_labels, 2
 
 
-# --- AG News (4-class topic classification) ---
-
 def _load_ag_news_split(split: str, max_samples: int, seed: int) -> tuple[list[str], list[int]]:
     dataset = load_dataset("ag_news", split=split)
     texts = list(dataset["text"])
@@ -65,8 +54,6 @@ def load_ag_news_data(
     test_texts, test_labels = _load_ag_news_split("test", test_samples, seed)
     return train_texts, train_labels, test_texts, test_labels, 4
 
-
-# --- IMDB (2-class sentiment) ---
 
 def _load_imdb_split(split: str, max_samples: int, seed: int) -> tuple[list[str], list[int]]:
     dataset = load_dataset("imdb", split=split)
@@ -85,8 +72,6 @@ def load_imdb_data(
     return train_texts, train_labels, test_texts, test_labels, 2
 
 
-# --- Yelp Polarity (2-class sentiment) ---
-
 def _load_yelp_split(split: str, max_samples: int, seed: int) -> tuple[list[str], list[int]]:
     dataset = load_dataset("yelp_polarity", split=split)
     texts = list(dataset["text"])
@@ -104,21 +89,16 @@ def load_yelp_data(
     return train_texts, train_labels, test_texts, test_labels, 2
 
 
-# --- Dispatch ---
-
 def load_dataset_by_name(
     name: str,
     train_samples: int,
     test_samples: int,
     seed: int = 42,
 ) -> tuple[list[str], list[int], list[str], list[int], int]:
-    """Dispatch to dataset-specific loader by name."""
     loaders = {
         "sst2": load_sst2_data,
         "ag_news": load_ag_news_data,
         "imdb": load_imdb_data,
         "yelp": load_yelp_data,
     }
-    if name not in loaders:
-        raise ValueError(f"Unknown dataset: {name}. Supported: {list(loaders.keys())}")
     return loaders[name](train_samples, test_samples, seed)

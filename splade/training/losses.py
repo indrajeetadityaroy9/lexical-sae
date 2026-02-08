@@ -1,13 +1,9 @@
-"""Training losses and DF statistics."""
-
 import torch
 
 from splade.training.constants import DF_ALPHA, DF_BETA, DF_MOMENTUM
 
 
 class DocumentFrequencyTracker:
-    """Track per-term document frequency for DF-weighted regularization."""
-
     def __init__(self, vocab_size: int, device: str | torch.device = "cuda"):
         self.vocab_size = vocab_size
         self.device = device
@@ -21,7 +17,6 @@ class DocumentFrequencyTracker:
         self.doc_count += sparse_vectors.shape[0]
 
     def get_weights(self) -> torch.Tensor:
-        """Compute DF-FLOPS weights using paper-mandated alpha/beta constants."""
         df_ratio = self.df_counts / self.doc_count
         eps = 1e-7
 
@@ -48,14 +43,11 @@ class DocumentFrequencyTracker:
         self.doc_count = 0
 
     def soft_reset(self) -> None:
-        """Decay counts instead of zeroing — stabilizes early-epoch DF estimates."""
         self.df_counts *= DF_MOMENTUM
         self.doc_count = int(self.doc_count * DF_MOMENTUM)
 
 
 class DFFlopsRegFunction(torch.autograd.Function):
-    """Autograd function for DF-weighted FLOPS regularization."""
-
     @staticmethod
     def forward(ctx, activations: torch.Tensor, df_weights: torch.Tensor) -> torch.Tensor:
         ctx.save_for_backward(activations, df_weights)

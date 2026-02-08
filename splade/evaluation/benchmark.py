@@ -1,5 +1,3 @@
-"""Benchmark execution and reporting utilities."""
-
 import math
 import time
 from dataclasses import dataclass, field
@@ -7,38 +5,26 @@ from dataclasses import dataclass, field
 import numpy
 from tqdm import tqdm
 
-from splade.evaluation.constants import (
-    K_VALUES,
-    K_MAX,
-    FFIDELITY_BETA,
-    FFIDELITY_N_SAMPLES,
-    SOFT_METRIC_N_SAMPLES,
-    NAOPC_BEAM_SIZE,
-    MONOTONICITY_STEPS,
-    ADVERSARIAL_MCP_THRESHOLD,
-    ADVERSARIAL_MAX_CHANGES,
-    ADVERSARIAL_TEST_SAMPLES,
-)
 from splade.evaluation.adversarial import compute_adversarial_sensitivity
+from splade.evaluation.causal import (MLMCounterfactualGenerator,
+                                      compute_causal_faithfulness)
+from splade.evaluation.constants import (ADVERSARIAL_MAX_CHANGES,
+                                         ADVERSARIAL_MCP_THRESHOLD,
+                                         ADVERSARIAL_TEST_SAMPLES,
+                                         FFIDELITY_BETA, FFIDELITY_N_SAMPLES,
+                                         K_MAX, K_VALUES, MONOTONICITY_STEPS,
+                                         NAOPC_BEAM_SIZE,
+                                         SOFT_METRIC_N_SAMPLES)
 from splade.evaluation.faithfulness import (
-    UnigramSampler,
-    compute_comprehensiveness,
-    compute_ffidelity_comprehensiveness,
-    compute_ffidelity_sufficiency,
-    compute_filler_comprehensiveness,
-    compute_monotonicity,
-    compute_normalized_aopc,
-    compute_soft_metrics,
-    compute_sufficiency,
-)
+    UnigramSampler, compute_comprehensiveness,
+    compute_ffidelity_comprehensiveness, compute_ffidelity_sufficiency,
+    compute_filler_comprehensiveness, compute_monotonicity,
+    compute_normalized_aopc, compute_soft_metrics, compute_sufficiency)
 from splade.evaluation.token_alignment import normalize_attributions_to_words
-from splade.evaluation.causal import compute_causal_faithfulness
 
 
 @dataclass
 class InterpretabilityResult:
-    """Collected metrics for one explanation method."""
-
     name: str
     comprehensiveness: dict[int, float] = field(default_factory=dict)
     sufficiency: dict[int, float] = field(default_factory=dict)
@@ -63,7 +49,6 @@ class InterpretabilityResult:
 
 
 def aggregate_results(results_list: list[list[InterpretabilityResult]]) -> list[dict]:
-    """Aggregate multi-seed results into mean and std stats."""
     if not results_list:
         return []
 
@@ -97,7 +82,6 @@ def aggregate_results(results_list: list[list[InterpretabilityResult]]) -> list[
 
 
 def print_aggregated_results(aggregated: list[dict]):
-    """Print mean +/- std table."""
     print("\n" + "=" * 140)
     print(f"{'Method':<20} {'Accuracy':>12} {'NAOPC':>12} {'Filler':>12} {'Latency (ms)':>15} {'Causal':>12}")
     print("-" * 140)
@@ -212,36 +196,29 @@ def benchmark_explainer(
     clf,
     name: str,
     explain_fn,
+    batch_explain_fn,
     test_texts: list[str],
     mask_token: str,
     seed: int,
-    attacks: list | None = None,
-    sampler: UnigramSampler | None = None,
-    ftuned_clf=None,
-    tokenizer=None,
+    attacks: list,
+    sampler: UnigramSampler,
+    ftuned_clf,
+    tokenizer,
     max_length: int = 128,
-    batch_explain_fn=None,
 ) -> InterpretabilityResult:
-    """Evaluate one explainer on the full metric suite using protocol constants."""
     k_values = list(K_VALUES)
 
     print(f"\nGenerating explanations for {name}...")
     start = time.time()
-    if batch_explain_fn is not None:
-        raw_attributions = batch_explain_fn(test_texts, K_MAX)
-    else:
-        raw_attributions = [explain_fn(text, K_MAX) for text in tqdm(test_texts, desc="Explaining")]
+    raw_attributions = batch_explain_fn(test_texts, K_MAX)
     explanation_time = time.time() - start
 
     inference_latency = explanation_time / len(test_texts) if test_texts else 0.0
 
-    if tokenizer is not None:
-        attributions = [
-            normalize_attributions_to_words(text, attrib, tokenizer)
-            for text, attrib in zip(test_texts, raw_attributions)
-        ]
-    else:
-        attributions = raw_attributions
+    attributions = [
+        normalize_attributions_to_words(text, attrib, tokenizer)
+        for text, attrib in zip(test_texts, raw_attributions)
+    ]
 
     print("Computing metrics...")
     result = InterpretabilityResult(
@@ -279,24 +256,22 @@ def benchmark_explainer(
         beta=FFIDELITY_BETA, original_probs=original_probs,
     )
 
-    if ftuned_clf is not None:
-        ft_original_probs = ftuned_clf.predict_proba(test_texts)
-        result.ffidelity_comp = compute_ffidelity_comprehensiveness(
-            ftuned_clf, test_texts, attributions, k_values, mask_token,
-            beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
-            original_probs=ft_original_probs,
-        )
-        result.ffidelity_suff = compute_ffidelity_sufficiency(
-            ftuned_clf, test_texts, attributions, k_values, mask_token,
-            beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
-            original_probs=ft_original_probs,
-        )
+    ft_original_probs = ftuned_clf.predict_proba(test_texts)
+    result.ffidelity_comp = compute_ffidelity_comprehensiveness(
+        ftuned_clf, test_texts, attributions, k_values, mask_token,
+        beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
+        original_probs=ft_original_probs,
+    )
+    result.ffidelity_suff = compute_ffidelity_sufficiency(
+        ftuned_clf, test_texts, attributions, k_values, mask_token,
+        beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
+        original_probs=ft_original_probs,
+    )
 
-    if sampler is not None:
-        result.filler_comprehensiveness = compute_filler_comprehensiveness(
-            clf, test_texts, attributions, k_values, sampler,
-            original_probs=original_probs,
-        )
+    result.filler_comprehensiveness = compute_filler_comprehensiveness(
+        clf, test_texts, attributions, k_values, sampler,
+        original_probs=original_probs,
+    )
 
     result.soft_comprehensiveness, result.soft_sufficiency = compute_soft_metrics(
         clf, test_texts, attributions, mask_token,
@@ -305,13 +280,10 @@ def benchmark_explainer(
         original_probs=original_probs,
     )
 
-    if tokenizer is not None:
-        def normalized_explain_fn(text, top_k):
-            raw = explain_fn(text, top_k)
-            return normalize_attributions_to_words(text, raw, tokenizer)
-        adv_explain_fn = normalized_explain_fn
-    else:
-        adv_explain_fn = explain_fn
+    def normalized_explain_fn(text, top_k):
+        raw = explain_fn(text, top_k)
+        return normalize_attributions_to_words(text, raw, tokenizer)
+    adv_explain_fn = normalized_explain_fn
 
     adv_subset_probs = original_probs[:ADVERSARIAL_TEST_SAMPLES]
     adv_result = compute_adversarial_sensitivity(
@@ -327,10 +299,13 @@ def benchmark_explainer(
     result.adversarial_sensitivity = adv_result["adversarial_sensitivity"]
     result.adversarial_mean_tau = adv_result["mean_tau"]
 
-    # Causal Metric
-    if hasattr(clf, 'model') and hasattr(clf, 'tokenizer') and hasattr(clf, 'max_length'):
-        result.causal_faithfulness = compute_causal_faithfulness(
-            clf.model, clf.tokenizer, test_texts, attributions, clf.max_length
-        )
+    result.causal_faithfulness = compute_causal_faithfulness(
+        clf.model,
+        clf.tokenizer,
+        test_texts,
+        attributions,
+        clf.max_length,
+        generator=MLMCounterfactualGenerator(clf.tokenizer.name_or_path),
+    )
 
     return result

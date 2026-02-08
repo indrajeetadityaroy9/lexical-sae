@@ -1,16 +1,15 @@
-"""F-Fidelity fine-tuning helpers."""
-
 import copy
 import random
+
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+
+from splade.evaluation.constants import FFIDELITY_FT_EPOCHS, FFIDELITY_FT_LR
 from splade.training.optim import _adaptive_gradient_clip
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
-from splade.evaluation.constants import FFIDELITY_FT_EPOCHS, FFIDELITY_FT_LR
 
 
 def _randomly_mask_text(text: str, beta: float, mask_token: str, rng: random.Random) -> str:
-    """Mask each word independently with probability beta (per-position Bernoulli)."""
     words = text.split()
     masked = [mask_token if rng.random() < beta else word for word in words]
     return " ".join(masked)
@@ -27,13 +26,7 @@ def finetune_splade_for_ffidelity(
     seed: int,
     max_length: int,
 ):
-    """Return a fine-tuned copy trained on randomly masked inputs."""
-    if hasattr(model, "_orig_mod"):
-        orig_model = model._orig_mod
-    else:
-        orig_model = model
-
-    fine_tuned_model = copy.deepcopy(orig_model)
+    fine_tuned_model = copy.deepcopy(model._orig_mod)
     fine_tuned_model.train()
     rng = random.Random(seed)
 
@@ -64,4 +57,4 @@ def finetune_splade_for_ffidelity(
             optimizer.step()
 
     fine_tuned_model.eval()
-    return fine_tuned_model
+    return torch.compile(fine_tuned_model, mode="reduce-overhead")

@@ -1,17 +1,9 @@
-"""Quadratic lambda schedule for regularization.
-
-Implements Sparsity-Accelerated Training (SAT) with a quadratic ramp
-from zero to LAMBDA_FINAL, per SPLADE v2 (arXiv:2109.10086, Section 4).
-"""
-
 import torch
 
 from splade.training.constants import LAMBDA_FINAL
 
 
 class SatLambdaSchedule:
-    """SAT Schedule: Dense phase (lambda=0) followed by quadratic ramp to LAMBDA_FINAL."""
-
     def __init__(self, warmup_steps: int, total_steps: int):
         self.warmup_steps = warmup_steps
         self.total_steps = total_steps
@@ -35,7 +27,6 @@ class SatLambdaSchedule:
         return LAMBDA_FINAL * (progress ** 2)
 
     def sync_sparsity(self) -> None:
-        """Sync accumulated GPU sparsity to CPU. Call once per epoch."""
         if self._sparsity_count > 0:
             if isinstance(self._sparsity_sum, torch.Tensor):
                 self._current_sparsity = (self._sparsity_sum / self._sparsity_count).item()

@@ -1,15 +1,8 @@
-"""Subword-to-word attribution alignment."""
-
-
 def _clean_subword(token: str) -> str:
-    """Strip subword markers from any tokenizer family."""
-    # WordPiece (BERT, DistilBERT): ##token
     if token.startswith("##"):
         return token[2:]
-    # SentencePiece (XLNet, T5): ▁token
     if token.startswith("\u2581"):
         return token[1:]
-    # BPE (GPT-2, RoBERTa): Ġtoken
     if token.startswith("\u0120"):
         return token[1:]
     return token
@@ -20,16 +13,9 @@ def normalize_attributions_to_words(
     attrib: list[tuple[str, float]],
     tokenizer,
 ) -> list[tuple[str, float]]:
-    """Map subword-level attributions to whitespace-delimited words.
-
-    For each word in the input text, tokenize it into subwords, look up
-    matching attribution scores, and aggregate: sum absolute values with
-    sign from the dominant (largest absolute) subword contribution.
-    """
     if not attrib:
         return []
 
-    # Build subword -> score lookup (first occurrence wins)
     subword_scores: dict[str, float] = {}
     for token, score in attrib:
         clean = _clean_subword(token.lower())

@@ -1,23 +1,16 @@
-"""Explainer baselines for interpretability benchmarking.
-
-Provides factory functions for: LIME, Integrated Gradients, GradientSHAP,
-Attention Rollout, Saliency (Gradient x Input), and DeepLIFT.
-All use the (text, top_k) -> list[tuple[str, float]] interface.
-"""
-
 import numpy
+import torch
+from captum.attr import (InputXGradient, LayerDeepLift, LayerGradientShap,
+                         LayerIntegratedGradients)
+from lime.lime_text import LimeTextExplainer
 
-from splade.evaluation.constants import (
-    LIME_N_SAMPLES,
-    IG_N_STEPS,
-    GRADIENT_SHAP_N_SAMPLES,
-)
+from splade.evaluation.constants import (GRADIENT_SHAP_N_SAMPLES, IG_N_STEPS,
+                                         LIME_N_SAMPLES)
+from splade.inference import SPECIAL_TOKENS
+from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
 
 
 def make_lime_explain_fn(predictor, seed: int = 42):
-    """LIME text explainer (Ribeiro et al., 2016)."""
-    from lime.lime_text import LimeTextExplainer
-
     explainer = LimeTextExplainer(random_state=seed)
 
     def explain_fn(text: str, top_k: int) -> list[tuple[str, float]]:
@@ -33,13 +26,7 @@ def make_lime_explain_fn(predictor, seed: int = 42):
 
 
 def make_ig_explain_fn(model, tokenizer, max_length: int):
-    """Integrated Gradients (Sundararajan et al., 2017) via captum."""
-    import torch
-    from captum.attr import LayerIntegratedGradients
-    from splade.utils.cuda import DEVICE
-    from splade.inference import SPECIAL_TOKENS
-
-    _model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _model = model._orig_mod
 
     def _forward_for_captum(input_ids, attention_mask):
         logits, _ = _model(input_ids, attention_mask)
@@ -83,13 +70,7 @@ def make_ig_explain_fn(model, tokenizer, max_length: int):
 
 
 def make_gradient_shap_explain_fn(model, tokenizer, max_length: int):
-    """GradientSHAP (Lundberg & Lee, 2017) via captum."""
-    import torch
-    from captum.attr import LayerGradientShap
-    from splade.utils.cuda import DEVICE
-    from splade.inference import SPECIAL_TOKENS
-
-    _model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _model = model._orig_mod
 
     def _forward_for_captum(input_ids, attention_mask):
         logits, _ = _model(input_ids, attention_mask)
@@ -105,7 +86,6 @@ def make_gradient_shap_explain_fn(model, tokenizer, max_length: int):
         input_ids = encoding["input_ids"].to(DEVICE)
         attention_mask = encoding["attention_mask"].to(DEVICE)
 
-        # Stochastic baselines: zero + random PAD permutations
         baselines = torch.full(
             (GRADIENT_SHAP_N_SAMPLES, input_ids.shape[1]),
             tokenizer.pad_token_id,
@@ -140,16 +120,7 @@ def make_gradient_shap_explain_fn(model, tokenizer, max_length: int):
 
 
 def make_attention_explain_fn(model, tokenizer, max_length: int):
-    """Attention Rollout (Abnar & Zuidema, 2020).
-
-    Recursively multiplies attention matrices across layers to compute
-    total attention flow from input tokens to the [CLS] token.
-    """
-    import torch
-    from splade.utils.cuda import DEVICE, COMPUTE_DTYPE
-    from splade.inference import SPECIAL_TOKENS
-
-    _model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _model = model._orig_mod
 
     def explain_fn(text: str, top_k: int) -> list[tuple[str, float]]:
         encoding = tokenizer(
@@ -166,25 +137,19 @@ def make_attention_explain_fn(model, tokenizer, max_length: int):
                 output_attentions=True,
             )
 
-        # Attention rollout: multiply attention matrices across layers
-        # Each attention tensor: [batch, heads, seq, seq]
         attentions = outputs.attentions
         rollout = None
         for attn in attentions:
-            # Average over attention heads
-            attn_mean = attn.mean(dim=1)  # [batch, seq, seq]
-            # Add identity (residual connection)
+            attn_mean = attn.mean(dim=1)
             identity = torch.eye(attn_mean.shape[-1], device=attn_mean.device)
             attn_with_residual = (attn_mean + identity) / 2
-            # Renormalize rows
             attn_with_residual = attn_with_residual / attn_with_residual.sum(dim=-1, keepdim=True)
             if rollout is None:
                 rollout = attn_with_residual
             else:
                 rollout = torch.bmm(attn_with_residual, rollout)
 
-        # Extract attention from [CLS] (position 0) to all other tokens
-        cls_attention = rollout[0, 0].cpu().numpy()  # [seq_len]
+        cls_attention = rollout[0, 0].cpu().numpy()
 
         tokens = tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
         attn_mask_cpu = attention_mask[0].cpu().tolist()
@@ -200,13 +165,7 @@ def make_attention_explain_fn(model, tokenizer, max_length: int):
 
 
 def make_saliency_explain_fn(model, tokenizer, max_length: int):
-    """Gradient x Input saliency (Simonyan et al., 2014) via captum."""
-    import torch
-    from captum.attr import InputXGradient
-    from splade.utils.cuda import DEVICE
-    from splade.inference import SPECIAL_TOKENS
-
-    _model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _model = model._orig_mod
 
     def _forward_from_embeds(embeddings, attention_mask):
         logits, _ = _model.forward_from_embeddings(embeddings, attention_mask)
@@ -222,7 +181,6 @@ def make_saliency_explain_fn(model, tokenizer, max_length: int):
         input_ids = encoding["input_ids"].to(DEVICE)
         attention_mask = encoding["attention_mask"].to(DEVICE)
 
-        # Get embeddings (requires grad for saliency)
         embeddings = _model.get_embeddings(input_ids).detach().requires_grad_(True)
 
         with torch.inference_mode():
@@ -234,7 +192,6 @@ def make_saliency_explain_fn(model, tokenizer, max_length: int):
             additional_forward_args=(attention_mask,),
             target=target,
         )
-        # Sum over embedding dim for per-token score
         token_attrs = attrs.sum(dim=-1).squeeze(0).cpu().detach().numpy()
 
         tokens = tokenizer.convert_ids_to_tokens(input_ids[0].cpu().tolist())
@@ -251,16 +208,7 @@ def make_saliency_explain_fn(model, tokenizer, max_length: int):
 
 
 def make_deeplift_explain_fn(model, tokenizer, max_length: int):
-    """DeepLIFT (Shrikumar et al., 2017) via captum.
-
-    Uses LayerDeepLift on the embedding layer with PAD token baseline.
-    """
-    import torch
-    from captum.attr import LayerDeepLift
-    from splade.utils.cuda import DEVICE
-    from splade.inference import SPECIAL_TOKENS
-
-    _model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _model = model._orig_mod
 
     def _forward_for_captum(input_ids, attention_mask):
         logits, _ = _model(input_ids, attention_mask)

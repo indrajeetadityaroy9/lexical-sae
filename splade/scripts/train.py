@@ -1,20 +1,19 @@
-"""CLI entry point for SPLADE training via YAML config."""
-
 import argparse
 import json
 import os
+from dataclasses import asdict
+
 import torch
 import yaml
-from dataclasses import asdict
 from transformers import AutoTokenizer
 
-from splade.data.loader import load_dataset_by_name, infer_max_length
-from splade.models.splade import SpladeModel
-from splade.utils.cuda import set_seed, DEVICE
 from splade.config.load import load_config
+from splade.data.loader import infer_max_length, load_dataset_by_name
+from splade.inference import score_model
+from splade.models.splade import SpladeModel
 from splade.training.loop import train_model
 from splade.training.optim import _infer_batch_size
-from splade.inference import score_model
+from splade.utils.cuda import DEVICE, set_seed
 
 
 def main() -> None:

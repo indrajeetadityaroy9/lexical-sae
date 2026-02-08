@@ -1,11 +1,3 @@
-"""Minimal configuration schema.
-
-All paper-mandated constants live in splade/training/constants.py and
-splade/evaluation/constants.py. This schema contains only the values
-that genuinely vary across experiments: dataset identity, model backbone,
-evaluation seeds, and which explainers to benchmark.
-"""
-
 from dataclasses import dataclass, field
 from typing import List
 

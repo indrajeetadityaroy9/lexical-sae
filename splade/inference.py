@@ -1,8 +1,7 @@
-"""Inference utilities."""
-
 import numpy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
 
 SPECIAL_TOKENS = {"[CLS]", "[SEP]", "[UNK]", "[MASK]", "[PAD]"}
@@ -72,7 +71,6 @@ def explain_model(
     target_class: int | None = None,
     input_only: bool = False,
 ) -> list[tuple[str, float]]:
-    # Single forward pass: get both logits and sparse vector
     encoding = tokenizer([text], max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
     logits, sparse = _run_inference_loop(
         model, encoding["input_ids"], encoding["attention_mask"],
@@ -84,14 +82,8 @@ def explain_model(
         probabilities = torch.nn.functional.softmax(logits, dim=-1)
         target_class = int(probabilities[0].argmax().item())
 
-    # Access classifier weight. If compiled, check _orig_mod
-    if hasattr(model, "_orig_mod"):
-        classifier_layer = model._orig_mod.classifier
-    else:
-        classifier_layer = model.classifier
-
     with torch.inference_mode():
-        weights = classifier_layer.weight[target_class].cpu().numpy()
+        weights = model._orig_mod.classifier.weight[target_class].cpu().numpy()
 
     contributions = sparse_vector * weights
     nonzero_indices = numpy.nonzero(contributions)[0]
@@ -127,7 +119,6 @@ def explain_model_batch(
     input_only: bool = False,
     batch_size: int = 32,
 ) -> list[list[tuple[str, float]]]:
-    """Batched explanation generation. Single forward pass for all texts."""
     encoding = tokenizer(texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
     logits, sparse = _run_inference_loop(
         model, encoding["input_ids"], encoding["attention_mask"],
@@ -137,15 +128,9 @@ def explain_model_batch(
     sparse_np = sparse.numpy()
     target_classes = probabilities.argmax(dim=-1).tolist()
 
-    if hasattr(model, "_orig_mod"):
-        classifier_layer = model._orig_mod.classifier
-    else:
-        classifier_layer = model.classifier
-
     with torch.inference_mode():
-        all_weights = classifier_layer.weight.cpu().numpy()
+        all_weights = model._orig_mod.classifier.weight.cpu().numpy()
 
-    # Pre-compute input_ids per text if input_only
     input_id_sets = None
     if input_only:
         input_id_sets = [
