@@ -1,12 +1,13 @@
 """CLI entry point for the canonical interpretability benchmark via YAML."""
 
 import argparse
+import json
 import os
 import yaml
 from dataclasses import asdict
 from transformers import AutoTokenizer
 
-from splade.data.loader import load_dataset_by_name
+from splade.data.loader import load_dataset_by_name, infer_max_length
 from splade.evaluation.adversarial import CharacterAttack, TextFoolerAttack, WordNetAttack
 from splade.evaluation.benchmark import (
     aggregate_results,
@@ -14,16 +15,30 @@ from splade.evaluation.benchmark import (
     print_aggregated_results,
     print_interpretability_results,
 )
-from splade.evaluation.explainers import make_lime_explain_fn, make_ig_explain_fn
+from splade.evaluation.constants import (
+    ADVERSARIAL_MAX_CHANGES,
+    FFIDELITY_BETA,
+    K_MAX,
+)
+from splade.evaluation.explainers import (
+    make_lime_explain_fn,
+    make_ig_explain_fn,
+    make_gradient_shap_explain_fn,
+    make_attention_explain_fn,
+    make_saliency_explain_fn,
+    make_deeplift_explain_fn,
+)
 from splade.evaluation.faithfulness import UnigramSampler
 from splade.models.splade import SpladeModel
 from splade.training.finetune import finetune_splade_for_ffidelity
-from splade.utils.cuda import set_seed, DEVICE
+from splade.training.optim import _infer_batch_size
+from splade.utils.cuda import set_seed, COMPUTE_DTYPE, DEVICE
 from splade.config.load import load_config
 from splade.config.schema import Config
 from splade.training.loop import train_model
-from splade.inference import score_model, explain_model
+from splade.inference import score_model, explain_model, explain_model_batch
 import torch
+
 
 class PredictorWrapper:
     """Wrapper to make SpladeModel compatible with EmbeddingPredictor protocol."""
@@ -38,7 +53,6 @@ class PredictorWrapper:
         return predict_proba_model(self.model, self.tokenizer, texts, self.max_length, self.batch_size)
 
     def get_embeddings(self, texts):
-        """Return (embeddings, attention_mask) tensors for embedding-level soft metrics."""
         encoding = self.tokenizer(
             texts, max_length=self.max_length,
             padding="max_length", truncation=True, return_tensors="pt",
@@ -46,17 +60,23 @@ class PredictorWrapper:
         input_ids = encoding["input_ids"].to(DEVICE)
         attention_mask = encoding["attention_mask"].to(DEVICE)
         _model = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
             embeddings = _model.get_embeddings(input_ids)
         return embeddings, attention_mask
 
     def predict_proba_from_embeddings(self, embeddings, attention_mask):
-        """Forward pass from pre-computed embeddings."""
         _model = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
             logits, _ = _model.forward_from_embeddings(embeddings, attention_mask)
         probs = torch.nn.functional.softmax(logits, dim=-1)
         return probs.cpu().tolist()
+
+    def predict_proba_from_embeddings_tensor(self, embeddings, attention_mask):
+        _model = self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model
+        with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
+            logits, _ = _model.forward_from_embeddings(embeddings, attention_mask)
+        return torch.nn.functional.softmax(logits, dim=-1)
+
 
 def run_benchmark(config: Config) -> list:
     """Run multi-seed benchmark defined by config."""
@@ -79,34 +99,35 @@ def run_benchmark(config: Config) -> list:
             config.data.test_samples,
             seed=seed,
         )
-        config.data.num_labels = num_labels
-        config.training.seed = seed
 
-        # Split train into train/val to avoid test-set leakage (G3)
+        tokenizer = AutoTokenizer.from_pretrained(config.model.name)
+        max_length = infer_max_length(train_texts, tokenizer)
+        batch_size = _infer_batch_size(config.model.name, max_length)
+        eval_batch_size = min(batch_size * 4, 128)
+        ft_batch_size = min(batch_size * 2, 64)
+
+        print(f"Auto-inferred: max_length={max_length}, train_batch={batch_size}, "
+              f"eval_batch={eval_batch_size}, ft_batch={ft_batch_size}")
+
+        # Split train into train/val
         val_size = min(200, len(train_texts) // 5)
         val_texts_split = train_texts[-val_size:]
         val_labels_split = train_labels[-val_size:]
         train_texts_split = train_texts[:-val_size]
         train_labels_split = train_labels[:-val_size]
 
-        tokenizer = AutoTokenizer.from_pretrained(config.model.name)
-        model = SpladeModel(config.model.name, config.data.num_labels).to(DEVICE)
+        model = SpladeModel(config.model.name, num_labels).to(DEVICE)
+        model = torch.compile(model, mode="reduce-overhead")
 
-        if config.model.compile:
-            model = torch.compile(model, mode=config.model.compile_mode)
-
-        train_model(model, tokenizer, train_texts_split, train_labels_split,
-                    config.training, config.model, config.data,
-                    val_texts=val_texts_split, val_labels=val_labels_split)
+        train_model(
+            model, tokenizer, train_texts_split, train_labels_split,
+            model_name=config.model.name, num_labels=num_labels,
+            val_texts=val_texts_split, val_labels=val_labels_split,
+        )
 
         accuracy = score_model(
-            model,
-            tokenizer,
-            test_texts,
-            test_labels,
-            config.data.max_length,
-            config.training.batch_size,
-            config.data.num_labels
+            model, tokenizer, test_texts, test_labels,
+            max_length, batch_size, num_labels,
         )
         print(f"Model Accuracy: {accuracy:.4f}")
         mask_token = tokenizer.mask_token
@@ -115,30 +136,28 @@ def run_benchmark(config: Config) -> list:
         print("\nFine-tuning model copy for F-Fidelity...")
 
         fine_tuned_model = finetune_splade_for_ffidelity(
-            model,
-            tokenizer,
-            train_texts_split,
-            train_labels_split,
-            beta=config.evaluation.ffidelity_beta,
-            ft_epochs=config.evaluation.ffidelity_ft_epochs,
-            ft_lr=config.evaluation.ffidelity_ft_lr,
-            batch_size=config.evaluation.ffidelity_ft_batch_size,
-            mask_token=mask_token,
-            seed=seed,
-            max_length=config.data.max_length
+            model, tokenizer, train_texts_split, train_labels_split,
+            beta=FFIDELITY_BETA, batch_size=ft_batch_size,
+            mask_token=mask_token, seed=seed, max_length=max_length,
         )
 
-        predictor = PredictorWrapper(model, tokenizer, config.data.max_length, config.evaluation.batch_size)
-        ft_predictor = PredictorWrapper(fine_tuned_model, tokenizer, config.data.max_length, config.evaluation.batch_size)
+        predictor = PredictorWrapper(model, tokenizer, max_length, eval_batch_size)
+        ft_predictor = PredictorWrapper(fine_tuned_model, tokenizer, max_length, eval_batch_size)
 
         attacks = [
-            WordNetAttack(max_changes=config.evaluation.adversarial_max_changes),
-            TextFoolerAttack(predictor, max_changes=config.evaluation.adversarial_max_changes),
-            CharacterAttack(max_changes=config.evaluation.adversarial_max_changes),
+            WordNetAttack(max_changes=ADVERSARIAL_MAX_CHANGES),
+            TextFoolerAttack(predictor, max_changes=ADVERSARIAL_MAX_CHANGES),
+            CharacterAttack(max_changes=ADVERSARIAL_MAX_CHANGES),
         ]
 
         def splade_explain_fn(text, top_k):
-            return explain_model(model, tokenizer, text, config.data.max_length, top_k=top_k, input_only=True)
+            return explain_model(model, tokenizer, text, max_length, top_k=top_k, input_only=True)
+
+        def splade_batch_explain_fn(texts, top_k):
+            return explain_model_batch(
+                model, tokenizer, texts, max_length,
+                top_k=top_k, input_only=True, batch_size=eval_batch_size,
+            )
 
         def random_explain_fn(text, top_k):
             import random as _rng
@@ -152,40 +171,40 @@ def run_benchmark(config: Config) -> list:
 
         results = []
         for explainer_name in config.evaluation.explainers:
+            batch_fn = None
+            tok = None
             if explainer_name == "splade":
                 fn = splade_explain_fn
+                batch_fn = splade_batch_explain_fn
                 tok = tokenizer
             elif explainer_name == "random":
                 fn = random_explain_fn
-                tok = None
             elif explainer_name == "lime":
-                fn = make_lime_explain_fn(
-                    predictor,
-                    num_samples=config.evaluation.lime_num_samples,
-                    seed=seed,
-                )
-                tok = None
+                fn = make_lime_explain_fn(predictor, seed=seed)
             elif explainer_name == "ig":
-                fn = make_ig_explain_fn(
-                    model, tokenizer, config.data.max_length,
-                    n_steps=config.evaluation.ig_n_steps,
-                )
+                fn = make_ig_explain_fn(model, tokenizer, max_length)
+                tok = tokenizer
+            elif explainer_name == "gradient_shap":
+                fn = make_gradient_shap_explain_fn(model, tokenizer, max_length)
+                tok = tokenizer
+            elif explainer_name == "attention":
+                fn = make_attention_explain_fn(model, tokenizer, max_length)
+                tok = tokenizer
+            elif explainer_name == "saliency":
+                fn = make_saliency_explain_fn(model, tokenizer, max_length)
+                tok = tokenizer
+            elif explainer_name == "deeplift":
+                fn = make_deeplift_explain_fn(model, tokenizer, max_length)
                 tok = tokenizer
             else:
                 raise ValueError(f"Unknown explainer: {explainer_name}")
 
             result = benchmark_explainer(
-                predictor,
-                explainer_name.upper(),
-                fn,
-                test_texts,
-                config.evaluation,
-                mask_token,
-                attacks=attacks,
-                sampler=sampler,
-                ftuned_clf=ft_predictor,
-                tokenizer=tok,
-                max_length=config.data.max_length,
+                predictor, explainer_name.upper(), fn, test_texts,
+                mask_token=mask_token, seed=seed,
+                attacks=attacks, sampler=sampler, ftuned_clf=ft_predictor,
+                tokenizer=tok, max_length=max_length,
+                batch_explain_fn=batch_fn,
             )
             result.accuracy = accuracy
             results.append(result)
@@ -195,11 +214,10 @@ def run_benchmark(config: Config) -> list:
     if len(config.evaluation.seeds) > 1:
         aggregated = aggregate_results(all_seed_results)
         print_aggregated_results(aggregated)
-        import json
         with open(os.path.join(config.output_dir, "metrics_aggregated.json"), "w") as f:
             json.dump(aggregated, f, indent=2)
     else:
-        print_interpretability_results(all_seed_results[0], config.evaluation)
+        print_interpretability_results(all_seed_results[0])
 
     return all_seed_results
 

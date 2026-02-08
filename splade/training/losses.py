@@ -2,6 +2,9 @@
 
 import torch
 
+from splade.training.constants import DF_ALPHA, DF_BETA, DF_MOMENTUM
+
+
 class DocumentFrequencyTracker:
     """Track per-term document frequency for DF-weighted regularization."""
 
@@ -10,25 +13,27 @@ class DocumentFrequencyTracker:
         self.device = device
         self.df_counts = torch.zeros(vocab_size, device=device)
         self.doc_count = 0
+        self._log_2 = torch.log(torch.tensor(2.0, device=device))
+        self._cached_log_alpha_2: torch.Tensor | None = None
 
     def update(self, sparse_vectors: torch.Tensor) -> None:
-        term_presence = (sparse_vectors.detach() > 0).float()
-        self.df_counts += term_presence.sum(dim=0)
+        self.df_counts += (sparse_vectors.detach() > 0).sum(dim=0)
         self.doc_count += sparse_vectors.shape[0]
 
-    def get_weights(self, alpha: float = 0.1, beta: float = 10.0) -> torch.Tensor:
+    def get_weights(self) -> torch.Tensor:
+        """Compute DF-FLOPS weights using paper-mandated alpha/beta constants."""
         df_ratio = self.df_counts / self.doc_count
-        # EPS for log stability in weight calculation (hardcoded for SOTA stability)
         eps = 1e-7
-        
-        log_alpha = torch.log(torch.tensor(alpha, device=self.device))
-        log_alpha = torch.where(log_alpha.abs() < eps, torch.tensor(eps, device=self.device), log_alpha)
-        log_alpha_2 = torch.log(torch.tensor(2.0, device=self.device)) / log_alpha
+
+        if self._cached_log_alpha_2 is None:
+            log_alpha = torch.log(torch.tensor(DF_ALPHA, device=self.device))
+            log_alpha = torch.where(log_alpha.abs() < eps, torch.tensor(eps, device=self.device), log_alpha)
+            self._cached_log_alpha_2 = self._log_2 / log_alpha
 
         x_clamped = df_ratio.clamp(min=1e-8)
-        x_pow = x_clamped.pow(log_alpha_2)
+        x_pow = x_clamped.pow(self._cached_log_alpha_2)
         inner = (x_pow - 1.0).clamp(min=0.0)
-        return 1.0 / (1.0 + inner.pow(beta))
+        return 1.0 / (1.0 + inner.pow(DF_BETA))
 
     def get_stats(self) -> dict:
         df_ratio = self.df_counts / self.doc_count
@@ -42,10 +47,11 @@ class DocumentFrequencyTracker:
         self.df_counts.zero_()
         self.doc_count = 0
 
-    def soft_reset(self, momentum: float = 0.9) -> None:
+    def soft_reset(self) -> None:
         """Decay counts instead of zeroing — stabilizes early-epoch DF estimates."""
-        self.df_counts *= momentum
-        self.doc_count = int(self.doc_count * momentum)
+        self.df_counts *= DF_MOMENTUM
+        self.doc_count = int(self.doc_count * DF_MOMENTUM)
+
 
 class DFFlopsRegFunction(torch.autograd.Function):
     """Autograd function for DF-weighted FLOPS regularization."""

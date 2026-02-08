@@ -7,16 +7,28 @@ from dataclasses import dataclass, field
 import numpy
 from tqdm import tqdm
 
-from splade.config.schema import EvaluationConfig
+from splade.evaluation.constants import (
+    K_VALUES,
+    K_MAX,
+    FFIDELITY_BETA,
+    FFIDELITY_N_SAMPLES,
+    SOFT_METRIC_N_SAMPLES,
+    NAOPC_BEAM_SIZE,
+    MONOTONICITY_STEPS,
+    ADVERSARIAL_MCP_THRESHOLD,
+    ADVERSARIAL_MAX_CHANGES,
+    ADVERSARIAL_TEST_SAMPLES,
+)
 from splade.evaluation.adversarial import compute_adversarial_sensitivity
 from splade.evaluation.faithfulness import (
     UnigramSampler,
     compute_comprehensiveness,
+    compute_ffidelity_comprehensiveness,
+    compute_ffidelity_sufficiency,
     compute_filler_comprehensiveness,
     compute_monotonicity,
     compute_normalized_aopc,
-    compute_soft_comprehensiveness,
-    compute_soft_sufficiency,
+    compute_soft_metrics,
     compute_sufficiency,
 )
 from splade.evaluation.token_alignment import normalize_attributions_to_words
@@ -54,60 +66,59 @@ def aggregate_results(results_list: list[list[InterpretabilityResult]]) -> list[
     """Aggregate multi-seed results into mean and std stats."""
     if not results_list:
         return []
-    
+
     methods = [r.name for r in results_list[0]]
     aggregated = []
 
     for i, name in enumerate(methods):
         method_seeds = [seeds[i] for seeds in results_list]
         stats = {"name": name}
-        
+
         metrics = [
             "monotonicity", "aopc", "naopc", "naopc_lower", "naopc_upper",
             "soft_comprehensiveness", "soft_sufficiency", "adversarial_sensitivity",
             "adversarial_mean_tau", "accuracy", "inference_latency", "causal_faithfulness"
         ]
-        
+
         for metric in metrics:
             vals = [getattr(s, metric) for s in method_seeds]
             stats[f"{metric}_mean"] = float(numpy.nanmean(vals))
             stats[f"{metric}_std"] = float(numpy.nanstd(vals))
 
-        # Handle k-dependent dicts (taking first k for simplicity in summary)
-        k_val = list(method_seeds[0].comprehensiveness.keys())[len(method_seeds[0].comprehensiveness)//2]
+        k_val = K_VALUES[len(K_VALUES) // 2]
         stats["k"] = k_val
         for metric in ["comprehensiveness", "sufficiency", "filler_comprehensiveness"]:
-            vals = [getattr(s, metric)[k_val] for s in method_seeds]
+            vals = [getattr(s, metric).get(k_val, 0.0) for s in method_seeds]
             stats[f"{metric}_mean"] = float(numpy.mean(vals))
             stats[f"{metric}_std"] = float(numpy.std(vals))
-            
+
         aggregated.append(stats)
     return aggregated
 
 
 def print_aggregated_results(aggregated: list[dict]):
-    """Print mean ± std table."""
+    """Print mean +/- std table."""
     print("\n" + "=" * 140)
     print(f"{'Method':<20} {'Accuracy':>12} {'NAOPC':>12} {'Filler':>12} {'Latency (ms)':>15} {'Causal':>12}")
     print("-" * 140)
     for res in aggregated:
         print(
             f"{res['name']:<20} "
-            f"{res['accuracy_mean']:>6.4f}±{res['accuracy_std']:>4.4f} "
-            f"{res['naopc_mean']:>6.4f}±{res['naopc_std']:>4.4f} "
-            f"{res['filler_comprehensiveness_mean']:>6.4f}±{res['filler_comprehensiveness_std']:>4.4f} "
-            f"{res['inference_latency_mean']*1000:>8.2f}±{res['inference_latency_std']*1000:>4.2f} "
-            f"{res['causal_faithfulness_mean']:>6.4f}±{res['causal_faithfulness_std']:>4.4f}"
+            f"{res['accuracy_mean']:>6.4f}+/-{res['accuracy_std']:>4.4f} "
+            f"{res['naopc_mean']:>6.4f}+/-{res['naopc_std']:>4.4f} "
+            f"{res['filler_comprehensiveness_mean']:>6.4f}+/-{res['filler_comprehensiveness_std']:>4.4f} "
+            f"{res['inference_latency_mean']*1000:>8.2f}+/-{res['inference_latency_std']*1000:>4.2f} "
+            f"{res['causal_faithfulness_mean']:>6.4f}+/-{res['causal_faithfulness_std']:>4.4f}"
         )
     print("=" * 140)
 
 
-def print_interpretability_results(results: list[InterpretabilityResult], config: EvaluationConfig) -> None:
+def print_interpretability_results(results: list[InterpretabilityResult]) -> None:
+    k_display = K_VALUES[len(K_VALUES) // 2]
+
     print("\n" + "=" * 80)
     print("INTERPRETABILITY BENCHMARK RESULTS")
     print("=" * 80)
-
-    k_display = config.k_display
 
     print(f"\n--- PRIMARY METRICS (robust to OOD artifacts) ---")
     print(f"\n{'Method':<30} {'NAOPC':>10} {'Filler@' + str(k_display):>12} {'Latency':>12} {'Causal':>10} {'Accuracy':>10}")
@@ -202,27 +213,27 @@ def benchmark_explainer(
     name: str,
     explain_fn,
     test_texts: list[str],
-    config: EvaluationConfig,
     mask_token: str,
+    seed: int,
     attacks: list | None = None,
     sampler: UnigramSampler | None = None,
     ftuned_clf=None,
     tokenizer=None,
     max_length: int = 128,
+    batch_explain_fn=None,
 ) -> InterpretabilityResult:
-    """Evaluate one explainer on the configured metric suite."""
-    k_values = list(config.k_values)
+    """Evaluate one explainer on the full metric suite using protocol constants."""
+    k_values = list(K_VALUES)
 
     print(f"\nGenerating explanations for {name}...")
     start = time.time()
-    raw_attributions = [explain_fn(text, config.k_max) for text in tqdm(test_texts, desc="Explaining")]
+    if batch_explain_fn is not None:
+        raw_attributions = batch_explain_fn(test_texts, K_MAX)
+    else:
+        raw_attributions = [explain_fn(text, K_MAX) for text in tqdm(test_texts, desc="Explaining")]
     explanation_time = time.time() - start
 
-    # Measure average inference latency for explanations
-    inference_start = time.time()
-    for text in test_texts[:10]:
-        _ = explain_fn(text, config.k_max)
-    inference_latency = (time.time() - inference_start) / 10
+    inference_latency = explanation_time / len(test_texts) if test_texts else 0.0
 
     if tokenizer is not None:
         attributions = [
@@ -234,99 +245,64 @@ def benchmark_explainer(
 
     print("Computing metrics...")
     result = InterpretabilityResult(
-        name=name, 
+        name=name,
         explanation_time=explanation_time,
         inference_latency=inference_latency
     )
-    result.comprehensiveness = compute_comprehensiveness(clf, test_texts, attributions, k_values, mask_token)
-    result.sufficiency = compute_sufficiency(clf, test_texts, attributions, k_values, mask_token)
-    result.monotonicity = compute_monotonicity(clf, test_texts, attributions, config.monotonicity_steps, mask_token)
-    aopc_scores = compute_comprehensiveness(
-        clf,
-        test_texts,
-        attributions,
-        list(range(1, config.k_max + 1)),
-        mask_token,
-    )
-    result.aopc = float(numpy.mean(list(aopc_scores.values())))
+
+    original_probs = clf.predict_proba(test_texts)
+
+    aopc_k_values = list(range(1, K_MAX + 1))
+    all_comp_k = sorted(set(k_values) | set(aopc_k_values))
+    all_comp_scores = compute_comprehensiveness(clf, test_texts, attributions, all_comp_k, mask_token, original_probs=original_probs)
+    result.comprehensiveness = {k: all_comp_scores[k] for k in k_values}
+    result.aopc = float(numpy.mean([all_comp_scores[k] for k in aopc_k_values]))
+
+    result.sufficiency = compute_sufficiency(clf, test_texts, attributions, k_values, mask_token, original_probs=original_probs)
+    result.monotonicity = compute_monotonicity(clf, test_texts, attributions, MONOTONICITY_STEPS, mask_token, original_probs=original_probs)
 
     naopc_result = compute_normalized_aopc(
-        clf,
-        test_texts,
-        attributions,
-        k_max=config.k_max,
-        beam_size=config.naopc_beam_size,
-        mask_token=mask_token,
+        clf, test_texts, attributions,
+        k_max=K_MAX, beam_size=NAOPC_BEAM_SIZE, mask_token=mask_token,
+        original_probs=original_probs,
     )
     result.naopc = naopc_result["naopc"]
     result.naopc_lower = naopc_result["aopc_lower"]
     result.naopc_upper = naopc_result["aopc_upper"]
 
     result.f_comprehensiveness = compute_comprehensiveness(
-        clf,
-        test_texts,
-        attributions,
-        k_values,
-        mask_token,
-        beta=config.ffidelity_beta,
+        clf, test_texts, attributions, k_values, mask_token,
+        beta=FFIDELITY_BETA, original_probs=original_probs,
     )
     result.f_sufficiency = compute_sufficiency(
-        clf,
-        test_texts,
-        attributions,
-        k_values,
-        mask_token,
-        beta=config.ffidelity_beta,
+        clf, test_texts, attributions, k_values, mask_token,
+        beta=FFIDELITY_BETA, original_probs=original_probs,
     )
 
     if ftuned_clf is not None:
-        result.ffidelity_comp = compute_comprehensiveness(
-            ftuned_clf,
-            test_texts,
-            attributions,
-            k_values,
-            mask_token,
-            beta=config.ffidelity_beta,
-            beta_mode="token_fraction",
+        ft_original_probs = ftuned_clf.predict_proba(test_texts)
+        result.ffidelity_comp = compute_ffidelity_comprehensiveness(
+            ftuned_clf, test_texts, attributions, k_values, mask_token,
+            beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
+            original_probs=ft_original_probs,
         )
-        result.ffidelity_suff = compute_sufficiency(
-            ftuned_clf,
-            test_texts,
-            attributions,
-            k_values,
-            mask_token,
-            beta=config.ffidelity_beta,
-            beta_mode="token_fraction",
+        result.ffidelity_suff = compute_ffidelity_sufficiency(
+            ftuned_clf, test_texts, attributions, k_values, mask_token,
+            beta=FFIDELITY_BETA, n_samples=FFIDELITY_N_SAMPLES, seed=seed,
+            original_probs=ft_original_probs,
         )
 
     if sampler is not None:
         result.filler_comprehensiveness = compute_filler_comprehensiveness(
-            clf,
-            test_texts,
-            attributions,
-            k_values,
-            sampler,
+            clf, test_texts, attributions, k_values, sampler,
+            original_probs=original_probs,
         )
 
-    result.soft_comprehensiveness = compute_soft_comprehensiveness(
-        clf,
-        test_texts,
-        attributions,
-        mask_token,
-        n_samples=config.soft_metric_n_samples,
-        seed=config.seed,
-        tokenizer=tokenizer,
-        max_length=max_length,
-    )
-    result.soft_sufficiency = compute_soft_sufficiency(
-        clf,
-        test_texts,
-        attributions,
-        mask_token,
-        n_samples=config.soft_metric_n_samples,
-        seed=config.seed,
-        tokenizer=tokenizer,
-        max_length=max_length,
+    result.soft_comprehensiveness, result.soft_sufficiency = compute_soft_metrics(
+        clf, test_texts, attributions, mask_token,
+        n_samples=SOFT_METRIC_N_SAMPLES, seed=seed,
+        tokenizer=tokenizer, max_length=max_length,
+        original_probs=original_probs,
     )
 
     if tokenizer is not None:
@@ -337,24 +313,24 @@ def benchmark_explainer(
     else:
         adv_explain_fn = explain_fn
 
+    adv_subset_probs = original_probs[:ADVERSARIAL_TEST_SAMPLES]
     adv_result = compute_adversarial_sensitivity(
-        clf,
-        adv_explain_fn,
-        test_texts[:config.adversarial_test_samples],
+        clf, adv_explain_fn,
+        test_texts[:ADVERSARIAL_TEST_SAMPLES],
         attacks=attacks,
-        max_changes=config.adversarial_max_changes,
-        mcp_threshold=config.adversarial_mcp_threshold,
-        top_k=config.k_max,
-        seed=config.seed,
+        max_changes=ADVERSARIAL_MAX_CHANGES,
+        mcp_threshold=ADVERSARIAL_MCP_THRESHOLD,
+        top_k=K_MAX,
+        seed=seed,
+        original_probs=adv_subset_probs,
     )
     result.adversarial_sensitivity = adv_result["adversarial_sensitivity"]
     result.adversarial_mean_tau = adv_result["mean_tau"]
-    
-    # Causal Metric (Counterfactual Consistency)
-    if config.enable_causal_metric:
-        if hasattr(clf, 'model') and hasattr(clf, 'tokenizer') and hasattr(clf, 'max_length'):
-            result.causal_faithfulness = compute_causal_faithfulness(
-                clf.model, clf.tokenizer, test_texts, attributions, clf.max_length
-            )
+
+    # Causal Metric
+    if hasattr(clf, 'model') and hasattr(clf, 'tokenizer') and hasattr(clf, 'max_length'):
+        result.causal_faithfulness = compute_causal_faithfulness(
+            clf.model, clf.tokenizer, test_texts, attributions, clf.max_length
+        )
 
     return result

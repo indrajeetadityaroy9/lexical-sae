@@ -3,7 +3,7 @@
 import numpy
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-from splade.utils.cuda import DEVICE
+from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
 
 SPECIAL_TOKENS = {"[CLS]", "[SEP]", "[UNK]", "[MASK]", "[PAD]"}
 
@@ -24,7 +24,7 @@ def _run_inference_loop(
     all_logits = []
     all_sparse = [] if extract_sparse else None
 
-    with torch.inference_mode():
+    with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
         for batch_ids, batch_mask in loader:
             batch_ids = batch_ids.to(DEVICE, non_blocking=True)
             batch_mask = batch_mask.to(DEVICE, non_blocking=True)
@@ -72,11 +72,17 @@ def explain_model(
     target_class: int | None = None,
     input_only: bool = False,
 ) -> list[tuple[str, float]]:
-    sparse_vector = transform_model(model, tokenizer, [text], max_length)[0]
+    # Single forward pass: get both logits and sparse vector
+    encoding = tokenizer([text], max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
+    logits, sparse = _run_inference_loop(
+        model, encoding["input_ids"], encoding["attention_mask"],
+        extract_sparse=True, batch_size=1,
+    )
+    sparse_vector = sparse[0].numpy()
 
     if target_class is None:
-        probabilities = predict_proba_model(model, tokenizer, [text], max_length)[0]
-        target_class = int(numpy.argmax(probabilities))
+        probabilities = torch.nn.functional.softmax(logits, dim=-1)
+        target_class = int(probabilities[0].argmax().item())
 
     # Access classifier weight. If compiled, check _orig_mod
     if hasattr(model, "_orig_mod"):
@@ -110,3 +116,70 @@ def explain_model(
             break
 
     return explanations
+
+
+def explain_model_batch(
+    model: torch.nn.Module,
+    tokenizer,
+    texts: list[str],
+    max_length: int,
+    top_k: int = 10,
+    input_only: bool = False,
+    batch_size: int = 32,
+) -> list[list[tuple[str, float]]]:
+    """Batched explanation generation. Single forward pass for all texts."""
+    encoding = tokenizer(texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
+    logits, sparse = _run_inference_loop(
+        model, encoding["input_ids"], encoding["attention_mask"],
+        extract_sparse=True, batch_size=batch_size,
+    )
+    probabilities = torch.nn.functional.softmax(logits, dim=-1)
+    sparse_np = sparse.numpy()
+    target_classes = probabilities.argmax(dim=-1).tolist()
+
+    if hasattr(model, "_orig_mod"):
+        classifier_layer = model._orig_mod.classifier
+    else:
+        classifier_layer = model.classifier
+
+    with torch.inference_mode():
+        all_weights = classifier_layer.weight.cpu().numpy()
+
+    # Pre-compute input_ids per text if input_only
+    input_id_sets = None
+    if input_only:
+        input_id_sets = [
+            set(tokenizer.encode(text, add_special_tokens=False)) for text in texts
+        ]
+
+    all_explanations = []
+    for idx in range(len(texts)):
+        target_class = target_classes[idx]
+        weights = all_weights[target_class]
+        contributions = sparse_np[idx] * weights
+        nonzero_indices = numpy.nonzero(contributions)[0]
+
+        if input_only and input_id_sets is not None:
+            nonzero_indices = numpy.array([i for i in nonzero_indices if i in input_id_sets[idx]])
+
+        if len(nonzero_indices) == 0:
+            all_explanations.append([])
+            continue
+
+        positive_mask = contributions[nonzero_indices] > 0
+        positive_indices = nonzero_indices[positive_mask]
+        negative_indices = nonzero_indices[~positive_mask]
+        positive_indices = positive_indices[numpy.argsort(contributions[positive_indices])[::-1]]
+        negative_indices = negative_indices[numpy.argsort(numpy.abs(contributions[negative_indices]))[::-1]]
+        ranked_indices = numpy.concatenate([positive_indices, negative_indices])
+
+        explanations = []
+        for index in ranked_indices:
+            token = tokenizer.convert_ids_to_tokens(int(index))
+            if token not in SPECIAL_TOKENS:
+                explanations.append((token, float(contributions[index])))
+            if len(explanations) >= top_k:
+                break
+        all_explanations.append(explanations)
+
+    return all_explanations

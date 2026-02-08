@@ -58,14 +58,29 @@ class TextFoolerAttack:
         predicted_class = int(numpy.argmax(original_probabilities))
         original_confidence = original_probabilities[predicted_class]
 
-        importance = []
+        # Batch all leave-one-out texts into a single predict_proba call
+        reduced_texts = []
+        reduced_indices = []
         for index in range(len(words)):
-            reduced_text = " ".join(words[:index] + words[index + 1 :])
+            reduced_text = " ".join(words[:index] + words[index + 1:])
             if not reduced_text.strip():
-                importance.append((index, 0.0))
                 continue
-            reduced_confidence = self.model.predict_proba([reduced_text])[0][predicted_class]
-            importance.append((index, original_confidence - reduced_confidence))
+            reduced_texts.append(reduced_text)
+            reduced_indices.append(index)
+
+        importance = []
+        if reduced_texts:
+            all_reduced_probs = self.model.predict_proba(reduced_texts)
+            ri = 0
+            for index in range(len(words)):
+                if ri < len(reduced_indices) and reduced_indices[ri] == index:
+                    reduced_confidence = all_reduced_probs[ri][predicted_class]
+                    importance.append((index, original_confidence - reduced_confidence))
+                    ri += 1
+                else:
+                    importance.append((index, 0.0))
+        else:
+            importance = [(index, 0.0) for index in range(len(words))]
         importance.sort(key=lambda pair: pair[1], reverse=True)
 
         modified_words = list(words)
@@ -179,13 +194,14 @@ def compute_adversarial_sensitivity(
     mcp_threshold: float,
     top_k: int,
     seed: int,
+    original_probs: list[list[float]] | None = None,
 ) -> dict:
     """Measure ranking instability under one or more attacks."""
     if attacks is None:
         attacks = [WordNetAttack(max_changes)]
 
     rng = random.Random(seed)
-    original_probabilities = model.predict_proba(texts)
+    original_probabilities = original_probs if original_probs is not None else model.predict_proba(texts)
     filtered_texts = [
         text
         for text, probabilities in zip(texts, original_probabilities)

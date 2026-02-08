@@ -32,18 +32,26 @@ class SpladeModel(torch.nn.Module):
         super().__init__()
         config = AutoConfig.from_pretrained(model_name)
         self.vocab_size = config.vocab_size
+        # Pad to multiple of 8 for Tensor Core alignment (30522 → 30528)
+        self.padded_vocab_size = (self.vocab_size + 7) // 8 * 8
 
         self.bert = AutoModel.from_pretrained(model_name, attn_implementation="sdpa")
 
-        # MLM head layers
+        # MLM head layers (padded for Tensor Core alignment)
         self.vocab_transform = torch.nn.Linear(config.hidden_size, config.hidden_size)
-        self.vocab_projector = torch.nn.Linear(config.hidden_size, self.vocab_size)
+        self.vocab_projector = torch.nn.Linear(config.hidden_size, self.padded_vocab_size)
         self.vocab_layer_norm = torch.nn.LayerNorm(config.hidden_size)
 
-        # Shifted-ReLU activation with learnable threshold
-        self.activation = DReLU(self.vocab_size)
+        # Shifted-ReLU activation with learnable threshold (padded)
+        self.activation = DReLU(self.padded_vocab_size)
 
-        # Initialize weights from pre-trained MLM head
+        # Zero padded regions so they produce zero sparse activations
+        if self.padded_vocab_size > self.vocab_size:
+            with torch.no_grad():
+                self.vocab_projector.weight[self.vocab_size:].zero_()
+                self.vocab_projector.bias[self.vocab_size:].zero_()
+
+        # Initialize weights from pre-trained MLM head into padded layers
         masked_lm = AutoModelForMaskedLM.from_pretrained(model_name)
         loaded = False
         for transform_path, norm_path, proj_path in self._MLM_HEAD_PATHS:
@@ -54,9 +62,11 @@ class SpladeModel(torch.nn.Module):
                 self.vocab_layer_norm.load_state_dict(
                     _get_nested_attr(masked_lm, norm_path).state_dict()
                 )
-                self.vocab_projector.load_state_dict(
-                    _get_nested_attr(masked_lm, proj_path).state_dict()
-                )
+                # Copy pretrained [V, H] weights into padded [V_pad, H] layer
+                pretrained_proj = _get_nested_attr(masked_lm, proj_path)
+                with torch.no_grad():
+                    self.vocab_projector.weight[:self.vocab_size].copy_(pretrained_proj.weight)
+                    self.vocab_projector.bias[:self.vocab_size].copy_(pretrained_proj.bias)
                 loaded = True
                 break
             except (AttributeError, RuntimeError):
@@ -67,7 +77,7 @@ class SpladeModel(torch.nn.Module):
             )
         del masked_lm
 
-        self.classifier = torch.nn.Linear(self.vocab_size, num_labels)
+        self.classifier = torch.nn.Linear(self.padded_vocab_size, num_labels)
 
     def _splade_head(
         self,

@@ -115,9 +115,10 @@ def _compute_masking_metric(
     mode: str,
     beta: float = 1.0,
     beta_mode: str = "token_fraction",
+    original_probs: list[list[float]] | None = None,
 ) -> dict[int, float]:
     results = {k: [] for k in k_values}
-    original_probabilities = model.predict_proba(texts)
+    original_probabilities = original_probs if original_probs is not None else model.predict_proba(texts)
 
     masked_texts = []
     index_map = []
@@ -157,8 +158,9 @@ def compute_comprehensiveness(
     mask_token: str,
     beta: float = 1.0,
     beta_mode: str = "token_fraction",
+    original_probs: list[list[float]] | None = None,
 ) -> dict[int, float]:
-    return _compute_masking_metric(model, texts, attributions, k_values, mask_token, "remove", beta, beta_mode)
+    return _compute_masking_metric(model, texts, attributions, k_values, mask_token, "remove", beta, beta_mode, original_probs=original_probs)
 
 
 def compute_sufficiency(
@@ -169,8 +171,9 @@ def compute_sufficiency(
     mask_token: str,
     beta: float = 1.0,
     beta_mode: str = "token_fraction",
+    original_probs: list[list[float]] | None = None,
 ) -> dict[int, float]:
-    return _compute_masking_metric(model, texts, attributions, k_values, mask_token, "keep", beta, beta_mode)
+    return _compute_masking_metric(model, texts, attributions, k_values, mask_token, "keep", beta, beta_mode, original_probs=original_probs)
 
 
 def compute_monotonicity(
@@ -179,6 +182,7 @@ def compute_monotonicity(
     attributions: list[list[tuple[str, float]]],
     steps: int,
     mask_token: str,
+    original_probs: list[list[float]] | None = None,
 ) -> float:
     all_masked_texts = []
     text_meta = []
@@ -205,8 +209,11 @@ def compute_monotonicity(
     if not all_masked_texts:
         return 0.0
 
-    original_texts = [texts[index] for index, _ in text_meta]
-    original_probabilities = model.predict_proba(original_texts)
+    if original_probs is not None:
+        original_probabilities = [original_probs[index] for index, _ in text_meta]
+    else:
+        original_texts = [texts[index] for index, _ in text_meta]
+        original_probabilities = model.predict_proba(original_texts)
     all_probabilities = model.predict_proba(all_masked_texts)
 
     total_monotonic = 0
@@ -233,6 +240,7 @@ def _compute_aopc_for_ordering(
     text: str,
     ordering: list[str],
     mask_token: str,
+    original_prob: list[float] | None = None,
 ) -> float:
     if not ordering:
         return 0.0
@@ -243,8 +251,11 @@ def _compute_aopc_for_ordering(
         removed_tokens.add(token.lower())
         masked_texts.append(_mask_by_token_set(text, removed_tokens, mask_token, mode="remove"))
 
-    all_texts = [text] + masked_texts
-    all_probabilities = model.predict_proba(all_texts)
+    if original_prob is not None:
+        all_probabilities = [original_prob] + model.predict_proba(masked_texts)
+    else:
+        all_texts = [text] + masked_texts
+        all_probabilities = model.predict_proba(all_texts)
 
     predicted_class = int(numpy.argmax(all_probabilities[0]))
     original_confidence = all_probabilities[0][predicted_class]
@@ -252,7 +263,7 @@ def _compute_aopc_for_ordering(
         original_confidence - all_probabilities[index + 1][predicted_class]
         for index in range(len(ordering))
     )
-    return total_drop / (len(ordering) + 1)
+    return total_drop / len(ordering)
 
 
 def _beam_search_ordering(
@@ -262,8 +273,9 @@ def _beam_search_ordering(
     beam_size: int,
     mask_token: str,
     maximize: bool = True,
+    original_prob: list[float] | None = None,
 ) -> float:
-    original_probability = model.predict_proba([text])[0]
+    original_probability = original_prob if original_prob is not None else model.predict_proba([text])[0]
     predicted_class = int(numpy.argmax(original_probability))
     original_confidence = original_probability[predicted_class]
     beams: list[tuple[set[str], list[str], float]] = [(set(), [], 0.0)]
@@ -295,7 +307,7 @@ def _beam_search_ordering(
         if not beams:
             break
 
-    return beams[0][2] / (len(tokens) + 1) if beams else 0.0
+    return beams[0][2] / len(tokens) if beams else 0.0
 
 
 def compute_normalized_aopc(
@@ -305,14 +317,18 @@ def compute_normalized_aopc(
     k_max: int,
     beam_size: int,
     mask_token: str,
+    original_probs: list[list[float]] | None = None,
 ) -> dict[str, float]:
     """Compute normalized AOPC from per-example beam-search bounds."""
+    if original_probs is None:
+        original_probs = model.predict_proba(texts)
+
     naopc_scores = []
     aopc_scores = []
     lower_scores = []
     upper_scores = []
 
-    for text, attrib in zip(texts, attributions):
+    for text_idx, (text, attrib) in enumerate(zip(texts, attributions)):
         seen: set[str] = set()
         tokens = []
         for token, weight in attrib:
@@ -324,11 +340,12 @@ def compute_normalized_aopc(
         if len(tokens) < 2:
             continue
 
+        orig_prob_i = original_probs[text_idx]
         token_set = set(tokens)
         attr_ordering = [token for token, _ in attrib if token in token_set]
-        aopc_x = _compute_aopc_for_ordering(model, text, attr_ordering, mask_token)
-        lower_x = _beam_search_ordering(model, text, tokens, beam_size, mask_token, maximize=False)
-        upper_x = _beam_search_ordering(model, text, tokens, beam_size, mask_token, maximize=True)
+        aopc_x = _compute_aopc_for_ordering(model, text, attr_ordering, mask_token, original_prob=orig_prob_i)
+        lower_x = _beam_search_ordering(model, text, tokens, beam_size, mask_token, maximize=False, original_prob=orig_prob_i)
+        upper_x = _beam_search_ordering(model, text, tokens, beam_size, mask_token, maximize=True, original_prob=orig_prob_i)
 
         aopc_scores.append(aopc_x)
         lower_scores.append(lower_x)
@@ -352,10 +369,11 @@ def compute_filler_comprehensiveness(
     attributions: list[list[tuple[str, float]]],
     k_values: tuple[int, ...] | list[int],
     sampler: UnigramSampler,
+    original_probs: list[list[float]] | None = None,
 ) -> dict[int, float]:
     """Comprehensiveness with corpus-sampled filler replacements."""
     results = {k: [] for k in k_values}
-    original_probabilities = model.predict_proba(texts)
+    original_probabilities = original_probs if original_probs is not None else model.predict_proba(texts)
 
     filled_texts = []
     index_map = []
@@ -381,6 +399,136 @@ def compute_filler_comprehensiveness(
         results[k].append(original_confidence - filled_confidence)
 
     return {k: float(numpy.mean(scores)) for k, scores in results.items()}
+
+
+def _stochastic_mask_text(
+    text: str,
+    attrib_token_set: set[str],
+    mask_token: str,
+    mode: str,
+    beta: float,
+    rng: numpy.random.Generator,
+) -> str:
+    """Apply attribution-based masking combined with stochastic Bernoulli masking.
+
+    Per arXiv:2410.02970 Algorithm 1: each non-attributed position is additionally
+    masked with probability beta, matching the fine-tuning distribution.
+    """
+    normalized_set = {t.strip('.,!?;:"\'-').lower() for t in attrib_token_set}
+    words = text.split()
+    result_words = []
+    for word in words:
+        clean = word.lower().strip('.,!?;:"\'-')
+        is_attributed = clean in normalized_set
+        if mode == "remove":
+            # Comprehensiveness: mask attributed tokens + random mask others
+            if is_attributed:
+                result_words.append(mask_token)
+            elif rng.random() < beta:
+                result_words.append(mask_token)
+            else:
+                result_words.append(word)
+        else:
+            # Sufficiency: keep attributed tokens, random mask others
+            if is_attributed:
+                result_words.append(word)
+            elif rng.random() < beta:
+                result_words.append(mask_token)
+            else:
+                result_words.append(word)
+    return " ".join(result_words)
+
+
+def compute_ffidelity_metric(
+    model: Predictor,
+    texts: list[str],
+    attributions: list[list[tuple[str, float]]],
+    k_values: tuple[int, ...] | list[int],
+    mask_token: str,
+    mode: str,
+    beta: float = 0.1,
+    n_samples: int = 50,
+    seed: int = 42,
+    original_probs: list[list[float]] | None = None,
+) -> dict[int, float]:
+    """Stochastic F-Fidelity metric (arXiv:2410.02970, Algorithm 1).
+
+    For each example and k, generates N stochastic masks combining attribution-based
+    masking with per-position Bernoulli(beta) noise, then averages the prediction shifts.
+    """
+    rng = numpy.random.default_rng(seed)
+    results = {k: [] for k in k_values}
+    original_probabilities = original_probs if original_probs is not None else model.predict_proba(texts)
+
+    # Phase 1: Generate all stochastic mask texts upfront
+    all_masked_texts = []
+    index_map = []  # (text_idx, k, predicted_class, original_confidence)
+    for text_idx, (text, attrib) in enumerate(zip(texts, attributions)):
+        original_probability = original_probabilities[text_idx]
+        predicted_class = int(numpy.argmax(original_probability))
+        original_confidence = original_probability[predicted_class]
+
+        for k in k_values:
+            top_tokens = _top_k_tokens(attrib, k)
+            for _ in range(n_samples):
+                all_masked_texts.append(
+                    _stochastic_mask_text(text, top_tokens, mask_token, mode, beta, rng)
+                )
+            index_map.append((text_idx, k, predicted_class, original_confidence))
+
+    # Phase 2: Single batched prediction for all masked texts
+    if all_masked_texts:
+        all_probs = model.predict_proba(all_masked_texts)
+    else:
+        all_probs = []
+
+    # Phase 3: Aggregate results
+    prob_idx = 0
+    for text_idx, k, predicted_class, original_confidence in index_map:
+        sample_probs = all_probs[prob_idx : prob_idx + n_samples]
+        prob_idx += n_samples
+        avg_confidence = float(numpy.mean([p[predicted_class] for p in sample_probs]))
+        results[k].append(original_confidence - avg_confidence)
+
+    return {k: float(numpy.mean(scores)) for k, scores in results.items()}
+
+
+def compute_ffidelity_comprehensiveness(
+    model: Predictor,
+    texts: list[str],
+    attributions: list[list[tuple[str, float]]],
+    k_values: tuple[int, ...] | list[int],
+    mask_token: str,
+    beta: float = 0.1,
+    n_samples: int = 50,
+    seed: int = 42,
+    original_probs: list[list[float]] | None = None,
+) -> dict[int, float]:
+    """Stochastic F-Fidelity comprehensiveness (arXiv:2410.02970)."""
+    return compute_ffidelity_metric(
+        model, texts, attributions, k_values, mask_token,
+        mode="remove", beta=beta, n_samples=n_samples, seed=seed,
+        original_probs=original_probs,
+    )
+
+
+def compute_ffidelity_sufficiency(
+    model: Predictor,
+    texts: list[str],
+    attributions: list[list[tuple[str, float]]],
+    k_values: tuple[int, ...] | list[int],
+    mask_token: str,
+    beta: float = 0.1,
+    n_samples: int = 50,
+    seed: int = 42,
+    original_probs: list[list[float]] | None = None,
+) -> dict[int, float]:
+    """Stochastic F-Fidelity sufficiency (arXiv:2410.02970)."""
+    return compute_ffidelity_metric(
+        model, texts, attributions, k_values, mask_token,
+        mode="keep", beta=beta, n_samples=n_samples, seed=seed,
+        original_probs=original_probs,
+    )
 
 
 def _clean_subword(token: str) -> str:
@@ -452,7 +600,7 @@ def _build_token_importances(
             importances[tok_idx] = word_importance[word_idx]
 
     max_imp = importances.max()
-    if max_imp > 0:
+    if max_imp > 1e-12:
         importances = importances / max_imp
     return importances
 
@@ -466,6 +614,7 @@ def compute_soft_comprehensiveness(
     seed: int = 42,
     tokenizer=None,
     max_length: int = 128,
+    original_probs: list[list[float]] | None = None,
 ) -> float:
     """Embedding-level Bernoulli dropout comprehensiveness (arXiv:2305.10496, Eq. 4).
 
@@ -473,8 +622,7 @@ def compute_soft_comprehensiveness(
     with probability a_i (the normalized attribution), then re-scored. The baseline
     is a zero-tensor forward pass (empty rationale).
     """
-    rng = numpy.random.default_rng(seed)
-    original_probs = model.predict_proba(texts)
+    orig_probs = original_probs if original_probs is not None else model.predict_proba(texts)
 
     # Get embeddings for all texts at once
     embeddings, attention_masks = model.get_embeddings(texts)
@@ -491,37 +639,46 @@ def compute_soft_comprehensiveness(
                 texts[text_idx], attributions[text_idx], tokenizer, max_length
             )
         else:
-            # Fallback: uniform zero (no attribution info at token level)
             seq_len = embeddings.shape[1]
             token_importances = numpy.zeros(seq_len)
 
-        predicted_class = int(numpy.argmax(original_probs[text_idx]))
-        orig_conf = original_probs[text_idx][predicted_class]
+        predicted_class = int(numpy.argmax(orig_probs[text_idx]))
+        orig_conf = orig_probs[text_idx][predicted_class]
         base_conf = baseline_probs[text_idx][predicted_class]
 
-        drops = []
         emb_i = embeddings[text_idx]  # [L, H]
-        mask_i = attention_masks[text_idx].unsqueeze(0)  # [1, L]
+        mask_i = attention_masks[text_idx]  # [L]
+        full_L = emb_i.shape[0]
 
-        for _ in range(n_samples):
-            # Per-dimension Bernoulli: zero out dimension j of token i with P=a_i
-            keep_mask = torch.ones_like(emb_i)
-            for tok_idx in range(min(len(token_importances), emb_i.shape[0])):
-                imp = token_importances[tok_idx]
-                if imp > 0:
-                    dim_keep = torch.from_numpy(
-                        (rng.random(embed_dim) >= imp).astype(numpy.float32)
-                    ).to(emb_i.device)
-                    keep_mask[tok_idx] = dim_keep
+        # Precompute importance tensor on GPU for vectorized Bernoulli sampling
+        seq_len = min(len(token_importances), full_L)
+        imp_tensor = torch.tensor(
+            token_importances[:seq_len], dtype=torch.float32, device=emb_i.device
+        ).unsqueeze(1)  # [L, 1] for broadcasting over embed_dim
 
-            perturbed = emb_i * keep_mask
-            pert_probs = model.predict_proba_from_embeddings(
-                perturbed.unsqueeze(0), mask_i
-            )
-            drops.append(orig_conf - pert_probs[0][predicted_class])
+        # Generate all n_samples perturbations at once: [n_samples, seq_len, embed_dim]
+        rand_all = torch.rand(n_samples, seq_len, embed_dim, device=emb_i.device)
+        keep_masks = (rand_all >= imp_tensor.unsqueeze(0)).float()
 
-        # Normalize by baseline (Eq. 4)
-        raw_comp = float(numpy.mean(drops))
+        # Pad to full sequence length if needed
+        if seq_len < full_L:
+            pad = torch.ones(n_samples, full_L - seq_len, embed_dim, device=emb_i.device)
+            keep_masks = torch.cat([keep_masks, pad], dim=1)
+
+        # Batch forward: [n_samples, L, H]
+        perturbed_batch = emb_i.unsqueeze(0) * keep_masks
+        mask_batch = mask_i.unsqueeze(0).expand(n_samples, -1)
+
+        # Use tensor variant if available to avoid per-sample CPU sync
+        if hasattr(model, 'predict_proba_from_embeddings_tensor'):
+            pert_probs_t = model.predict_proba_from_embeddings_tensor(perturbed_batch, mask_batch)
+            mean_drop = float((orig_conf - pert_probs_t[:, predicted_class]).mean().item())
+        else:
+            pert_probs = model.predict_proba_from_embeddings(perturbed_batch, mask_batch)
+            mean_drop = float(numpy.mean([orig_conf - pert_probs[s][predicted_class] for s in range(n_samples)]))
+
+        # Normalize by baseline (arXiv:2305.10496 Eq. 4): NC(a) = max(0, C̃(a)) / (1 - Ŝ(∅))
+        raw_comp = max(0.0, mean_drop)
         baseline_suff = 1.0 - max(0.0, orig_conf - base_conf)
         denom = 1.0 - baseline_suff
         scores.append(raw_comp / denom if denom > 1e-8 else 0.0)
@@ -538,14 +695,14 @@ def compute_soft_sufficiency(
     seed: int = 42,
     tokenizer=None,
     max_length: int = 128,
+    original_probs: list[list[float]] | None = None,
 ) -> float:
     """Embedding-level Bernoulli retention sufficiency (arXiv:2305.10496, Eq. 5).
 
     For each token position i, each embedding dimension is retained with
     probability a_i and zeroed with probability (1 - a_i).
     """
-    rng = numpy.random.default_rng(seed)
-    original_probs = model.predict_proba(texts)
+    orig_probs = original_probs if original_probs is not None else model.predict_proba(texts)
 
     embeddings, attention_masks = model.get_embeddings(texts)
     embed_dim = embeddings.shape[-1]
@@ -564,35 +721,134 @@ def compute_soft_sufficiency(
             seq_len = embeddings.shape[1]
             token_importances = numpy.zeros(seq_len)
 
-        predicted_class = int(numpy.argmax(original_probs[text_idx]))
-        orig_conf = original_probs[text_idx][predicted_class]
+        predicted_class = int(numpy.argmax(orig_probs[text_idx]))
+        orig_conf = orig_probs[text_idx][predicted_class]
         base_conf = baseline_probs[text_idx][predicted_class]
 
-        drops = []
         emb_i = embeddings[text_idx]
-        mask_i = attention_masks[text_idx].unsqueeze(0)
+        mask_i = attention_masks[text_idx]  # [L]
+        full_L = emb_i.shape[0]
 
-        for _ in range(n_samples):
-            # Retain dimension j of token i with P=a_i, zero with P=(1-a_i)
-            retain_mask = torch.zeros_like(emb_i)
-            for tok_idx in range(min(len(token_importances), emb_i.shape[0])):
-                imp = token_importances[tok_idx]
-                if imp > 0:
-                    dim_retain = torch.from_numpy(
-                        (rng.random(embed_dim) < imp).astype(numpy.float32)
-                    ).to(emb_i.device)
-                    retain_mask[tok_idx] = dim_retain
+        # Precompute importance tensor on GPU for vectorized Bernoulli sampling
+        seq_len = min(len(token_importances), full_L)
+        imp_tensor = torch.tensor(
+            token_importances[:seq_len], dtype=torch.float32, device=emb_i.device
+        ).unsqueeze(1)  # [L, 1] for broadcasting over embed_dim
 
-            perturbed = emb_i * retain_mask
-            pert_probs = model.predict_proba_from_embeddings(
-                perturbed.unsqueeze(0), mask_i
-            )
-            drops.append(orig_conf - pert_probs[0][predicted_class])
+        # Generate all n_samples perturbations at once: [n_samples, seq_len, embed_dim]
+        rand_all = torch.rand(n_samples, seq_len, embed_dim, device=emb_i.device)
+        retain_masks = (rand_all < imp_tensor.unsqueeze(0)).float()
 
-        # Normalize by baseline (Eq. 5)
-        raw_suff = 1.0 - max(0.0, float(numpy.mean(drops)))
+        # Pad to full sequence length if needed (padding positions stay zero)
+        if seq_len < full_L:
+            pad = torch.zeros(n_samples, full_L - seq_len, embed_dim, device=emb_i.device)
+            retain_masks = torch.cat([retain_masks, pad], dim=1)
+
+        # Batch forward: [n_samples, L, H]
+        perturbed_batch = emb_i.unsqueeze(0) * retain_masks
+        mask_batch = mask_i.unsqueeze(0).expand(n_samples, -1)
+
+        # Use tensor variant if available to avoid per-sample CPU sync
+        if hasattr(model, 'predict_proba_from_embeddings_tensor'):
+            pert_probs_t = model.predict_proba_from_embeddings_tensor(perturbed_batch, mask_batch)
+            mean_drop = float((orig_conf - pert_probs_t[:, predicted_class]).mean().item())
+        else:
+            pert_probs = model.predict_proba_from_embeddings(perturbed_batch, mask_batch)
+            mean_drop = float(numpy.mean([orig_conf - pert_probs[s][predicted_class] for s in range(n_samples)]))
+
+        # Normalize by baseline (arXiv:2305.10496 Eq. 5): NS(a) = max(0, S̃(a) - Ŝ(∅)) / (1 - Ŝ(∅))
+        raw_suff = 1.0 - max(0.0, mean_drop)
         baseline_suff = 1.0 - max(0.0, orig_conf - base_conf)
         denom = 1.0 - baseline_suff
-        scores.append((raw_suff - baseline_suff) / denom if denom > 1e-8 else 0.0)
+        scores.append(max(0.0, raw_suff - baseline_suff) / denom if denom > 1e-8 else 0.0)
 
     return float(numpy.mean(scores)) if scores else 0.0
+
+
+def compute_soft_metrics(
+    model: EmbeddingPredictor,
+    texts: list[str],
+    attributions: list[list[tuple[str, float]]],
+    mask_token: str,
+    n_samples: int = 20,
+    seed: int = 42,
+    tokenizer=None,
+    max_length: int = 128,
+    original_probs: list[list[float]] | None = None,
+) -> tuple[float, float]:
+    """Compute both soft comprehensiveness and soft sufficiency sharing embeddings.
+
+    Returns (soft_comp, soft_suff). Merges two separate get_embeddings + baseline
+    calls into one, halving the embedding computation.
+    """
+    orig_probs = original_probs if original_probs is not None else model.predict_proba(texts)
+
+    # Shared embedding + baseline computation (was done twice before)
+    embeddings, attention_masks = model.get_embeddings(texts)
+    embed_dim = embeddings.shape[-1]
+    zero_emb = torch.zeros_like(embeddings)
+    baseline_probs = model.predict_proba_from_embeddings(zero_emb, attention_masks)
+
+    comp_scores = []
+    suff_scores = []
+    for text_idx in range(len(texts)):
+        if tokenizer is not None:
+            token_importances = _build_token_importances(
+                texts[text_idx], attributions[text_idx], tokenizer, max_length
+            )
+        else:
+            seq_len = embeddings.shape[1]
+            token_importances = numpy.zeros(seq_len)
+
+        predicted_class = int(numpy.argmax(orig_probs[text_idx]))
+        orig_conf = orig_probs[text_idx][predicted_class]
+        base_conf = baseline_probs[text_idx][predicted_class]
+
+        emb_i = embeddings[text_idx]
+        mask_i = attention_masks[text_idx]
+        full_L = emb_i.shape[0]
+
+        seq_len = min(len(token_importances), full_L)
+        imp_tensor = torch.tensor(
+            token_importances[:seq_len], dtype=torch.float32, device=emb_i.device
+        ).unsqueeze(1)
+
+        # --- Comprehensiveness: zero with probability a_i ---
+        rand_comp = torch.rand(n_samples, seq_len, embed_dim, device=emb_i.device)
+        keep_masks = (rand_comp >= imp_tensor.unsqueeze(0)).float()
+        if seq_len < full_L:
+            keep_masks = torch.cat([keep_masks, torch.ones(n_samples, full_L - seq_len, embed_dim, device=emb_i.device)], dim=1)
+        pert_comp = emb_i.unsqueeze(0) * keep_masks
+        mask_batch = mask_i.unsqueeze(0).expand(n_samples, -1)
+
+        # --- Sufficiency: retain with probability a_i ---
+        rand_suff = torch.rand(n_samples, seq_len, embed_dim, device=emb_i.device)
+        retain_masks = (rand_suff < imp_tensor.unsqueeze(0)).float()
+        if seq_len < full_L:
+            retain_masks = torch.cat([retain_masks, torch.zeros(n_samples, full_L - seq_len, embed_dim, device=emb_i.device)], dim=1)
+        pert_suff = emb_i.unsqueeze(0) * retain_masks
+
+        if hasattr(model, 'predict_proba_from_embeddings_tensor'):
+            comp_probs_t = model.predict_proba_from_embeddings_tensor(pert_comp, mask_batch)
+            comp_drop = float((orig_conf - comp_probs_t[:, predicted_class]).mean().item())
+            suff_probs_t = model.predict_proba_from_embeddings_tensor(pert_suff, mask_batch)
+            suff_drop = float((orig_conf - suff_probs_t[:, predicted_class]).mean().item())
+        else:
+            comp_probs = model.predict_proba_from_embeddings(pert_comp, mask_batch)
+            comp_drop = float(numpy.mean([orig_conf - comp_probs[s][predicted_class] for s in range(n_samples)]))
+            suff_probs = model.predict_proba_from_embeddings(pert_suff, mask_batch)
+            suff_drop = float(numpy.mean([orig_conf - suff_probs[s][predicted_class] for s in range(n_samples)]))
+
+        # Comprehensiveness normalization (Eq. 4)
+        raw_comp = max(0.0, comp_drop)
+        baseline_suff = 1.0 - max(0.0, orig_conf - base_conf)
+        denom = 1.0 - baseline_suff
+        comp_scores.append(raw_comp / denom if denom > 1e-8 else 0.0)
+
+        # Sufficiency normalization (Eq. 5)
+        raw_suff = 1.0 - max(0.0, suff_drop)
+        suff_scores.append(max(0.0, raw_suff - baseline_suff) / denom if denom > 1e-8 else 0.0)
+
+    soft_comp = float(numpy.mean(comp_scores)) if comp_scores else 0.0
+    soft_suff = float(numpy.mean(suff_scores)) if suff_scores else 0.0
+    return soft_comp, soft_suff

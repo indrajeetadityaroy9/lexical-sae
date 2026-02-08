@@ -1,7 +1,8 @@
-"""Dataset loading for classification benchmarks."""
+"""Dataset loading and data-driven inference utilities."""
 
 import random
 
+import numpy
 from datasets import load_dataset
 
 
@@ -12,6 +13,19 @@ def _shuffle_and_truncate(
     random.Random(seed).shuffle(combined)
     shuffled_texts, shuffled_labels = zip(*combined)
     return list(shuffled_texts)[:max_samples], list(shuffled_labels)[:max_samples]
+
+
+def infer_max_length(texts: list[str], tokenizer) -> int:
+    """Infer sequence length from the 99th percentile of token counts.
+
+    Samples up to 500 texts for speed, rounds up to a multiple of 8 for
+    Tensor Core alignment, and clamps to [64, 512].
+    """
+    sample = texts[:500]
+    lengths = [len(tokenizer.encode(t, add_special_tokens=True)) for t in sample]
+    p99 = int(numpy.percentile(lengths, 99))
+    aligned = ((p99 + 7) // 8) * 8
+    return max(64, min(512, aligned))
 
 
 # --- SST-2 (2-class sentiment) ---

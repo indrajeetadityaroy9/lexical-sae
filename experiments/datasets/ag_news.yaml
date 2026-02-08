@@ -1,42 +1,14 @@
-experiment_name: "dataset_ag_news"
+experiment_name: "ag_news_distilbert"
 output_dir: "results/datasets/ag_news"
 
 data:
   dataset_name: "ag_news"
   train_samples: 2000
   test_samples: 200
-  max_length: 128
 
 model:
   name: "distilbert-base-uncased"
-  regularization: "df_flops"
-  compile: true
-  compile_mode: "max-autotune"
-
-training:
-  batch_size: 64
-  max_epochs: 20
-  patience: 3
-  seed: 42
-  df_alpha: 0.1
-  df_beta: 5.0
-  clip_factor: 0.01
-  target_lambda_ratio: 0.5
-  num_workers: 4
-  prefetch_factor: 2
 
 evaluation:
-  batch_size: 32
-  explainers: ["splade", "random", "lime", "ig"]
   seeds: [42]
-  k_values: [1, 5, 10, 20]
-  ffidelity_beta: 0.1
-  ffidelity_ft_epochs: 30
-  ffidelity_ft_lr: 1.0e-4
-  ffidelity_ft_batch_size: 16
-  monotonicity_steps: 10
-  naopc_beam_size: 15
-  soft_metric_n_samples: 20
-  adversarial_mcp_threshold: 0.7
-  adversarial_max_changes: 3
-  adversarial_test_samples: 50
+  explainers: ["splade", "lime", "ig", "gradient_shap", "attention", "saliency", "deeplift", "random"]
