@@ -19,21 +19,14 @@ for config in experiments/datasets/*.yaml; do
     python -m splade.scripts.run_experiment --config "$config"
 done
 
-# 3. Scaling Experiments
-echo "Running CIS Scaling Experiments..."
-for config in experiments/scaling/*.yaml; do
-    echo "Running $config"
-    python -m splade.scripts.run_experiment --config "$config"
-done
-
-# 4. Ablations
+# 3. Ablations
 echo "Running CIS Ablations..."
 for config in experiments/ablation/*.yaml; do
     echo "Running $config"
     python -m splade.scripts.run_ablation --config "$config"
 done
 
-# 5. Mechanistic Evaluation
+# 4. Mechanistic Evaluation
 echo "Running Mechanistic Evaluation..."
 for config in experiments/mechanistic/*.yaml; do
     echo "Running $config"

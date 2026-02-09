@@ -12,12 +12,12 @@ from splade.evaluation.baselines import (
 from splade.evaluation.compare_explainers import _EXPLAINERS
 
 
-class FakeCISModel(torch.nn.Module):
-    """Minimal model mimicking CISModel's interface for testing."""
+class FakeLexicalSAE(torch.nn.Module):
+    """Minimal model mimicking LexicalSAE's interface for testing."""
 
     def __init__(self, vocab_size=100, num_labels=2, hidden=32):
         super().__init__()
-        self.padded_vocab_size = vocab_size
+        self.vocab_size = vocab_size
         self.classifier_fc1 = torch.nn.Linear(vocab_size, hidden)
         self.classifier_fc2 = torch.nn.Linear(hidden, num_labels)
         # Fixed embedding for deterministic forward pass
@@ -26,7 +26,7 @@ class FakeCISModel(torch.nn.Module):
     def forward(self, input_ids, attention_mask):
         B = input_ids.shape[0]
         # Deterministic sparse_vector from input_ids (simulates SPLADE head)
-        emb = self._embedding(input_ids.clamp(max=self.padded_vocab_size - 1))
+        emb = self._embedding(input_ids.clamp(max=self.vocab_size - 1))
         sparse_vector = emb.mean(dim=1)  # [B, V]
 
         # ReLU MLP classifier with W_eff
@@ -52,7 +52,7 @@ class FakeCISModel(torch.nn.Module):
 @pytest.fixture
 def fake_model():
     torch.manual_seed(42)
-    return FakeCISModel()
+    return FakeLexicalSAE()
 
 
 @pytest.fixture
@@ -152,13 +152,13 @@ class _FakeBERTWithAttention(torch.nn.Module):
         return _Out()
 
 
-class FakeCISModelWithAttention(torch.nn.Module):
-    """FakeCISModel with BERT-like structure for testing attention_attribution."""
+class FakeLexicalSAEWithAttention(torch.nn.Module):
+    """FakeLexicalSAE with BERT-like structure for testing attention_attribution."""
 
     def __init__(self, vocab_size=100, num_labels=2, hidden=32):
         super().__init__()
-        self.padded_vocab_size = vocab_size
-        self.bert = _FakeBERTWithAttention(hidden, vocab_size)
+        self.vocab_size = vocab_size
+        self._encoder = _FakeBERTWithAttention(hidden, vocab_size)
         self.vocab_transform = torch.nn.Linear(hidden, hidden)
         self.vocab_projector = torch.nn.Linear(hidden, vocab_size)
         self.vocab_layer_norm = torch.nn.LayerNorm(hidden)
@@ -171,11 +171,25 @@ class FakeCISModelWithAttention(torch.nn.Module):
         self.classifier_fc1 = torch.nn.Linear(vocab_size, hidden)
         self.classifier_fc2 = torch.nn.Linear(hidden, num_labels)
 
+    @property
+    def encoder(self):
+        return self._encoder
+
+    def _compute_sparse_sequence(self, attention_mask, *, input_ids=None, **kwargs):
+        hidden = self._encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        transformed = self.vocab_transform(hidden)
+        transformed = torch.nn.functional.gelu(transformed)
+        transformed = self.vocab_layer_norm(transformed)
+        mlm_logits = self.vocab_projector(transformed)
+        activated = self.activation(mlm_logits)
+        log_act = torch.log1p(activated)
+        return log_act.masked_fill(~attention_mask.unsqueeze(-1).bool(), 0.0)
+
 
 class TestAttentionAttribution:
     def test_output_shape(self):
         torch.manual_seed(42)
-        model = FakeCISModelWithAttention()
+        model = FakeLexicalSAEWithAttention()
         input_ids = torch.randint(0, 100, (4, 16))
         attention_mask = torch.ones(4, 16, dtype=torch.long)
         targets = torch.zeros(4, dtype=torch.long)
@@ -184,7 +198,7 @@ class TestAttentionAttribution:
 
     def test_nonzero(self):
         torch.manual_seed(42)
-        model = FakeCISModelWithAttention()
+        model = FakeLexicalSAEWithAttention()
         input_ids = torch.randint(0, 100, (4, 16))
         attention_mask = torch.ones(4, 16, dtype=torch.long)
         targets = torch.zeros(4, dtype=torch.long)

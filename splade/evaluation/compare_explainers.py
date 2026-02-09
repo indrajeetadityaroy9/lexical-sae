@@ -53,7 +53,8 @@ def run_explainer_comparison(
         batch_ids = torch.cat(input_ids_list[start:end], dim=0)
         batch_mask = torch.cat(attention_mask_list[start:end], dim=0)
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, sparse_vector, _, _ = _model(batch_ids, batch_mask)
+            sparse_seq = _model(batch_ids, batch_mask)
+            sparse_vector = _model.to_pooled(sparse_seq, batch_mask)
         all_sparse.append(sparse_vector.float())
     sparse_vectors = torch.cat(all_sparse, dim=0)
 

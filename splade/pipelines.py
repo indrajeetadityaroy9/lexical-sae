@@ -13,7 +13,7 @@ from splade.config.schema import Config
 from splade.circuits.losses import AttributionCentroidTracker
 from splade.data.loader import infer_max_length, load_dataset_by_name
 from splade.inference import score_model
-from splade.models.splade import CISModel
+from splade.models.lexical_sae import LexicalSAE
 from splade.training.loop import train_model
 from splade.training.optim import _infer_batch_size
 from splade.utils.cuda import DEVICE, set_seed
@@ -47,7 +47,7 @@ def setup_and_train(config: Config, seed: int) -> TrainedExperiment:
     )
 
     tokenizer = AutoTokenizer.from_pretrained(config.model.name)
-    max_length = infer_max_length(train_texts, tokenizer)
+    max_length = infer_max_length(train_texts, tokenizer, model_name=config.model.name)
     batch_size = _infer_batch_size(config.model.name, max_length)
 
     val_size = min(200, len(train_texts) // 5)
@@ -56,10 +56,10 @@ def setup_and_train(config: Config, seed: int) -> TrainedExperiment:
     train_texts_split = train_texts[:-val_size]
     train_labels_split = train_labels[:-val_size]
 
-    model = CISModel(config.model.name, num_labels).to(DEVICE)
-    # torch.compile disabled: bf16 autocast dtype mismatch with distilbert
-    # on PyTorch 2.7 (addmm gets Float vs BFloat16). Batched eval loops
-    # provide the main throughput improvement.
+    model = LexicalSAE(config.model.name, num_labels).to(DEVICE)
+    # torch.compile disabled: bf16 autocast dtype mismatch on PyTorch 2.7
+    # (addmm gets Float vs BFloat16). Batched eval loops provide the main
+    # throughput improvement.
     # model = torch.compile(model, dynamic=True)
 
     centroid_tracker = train_model(

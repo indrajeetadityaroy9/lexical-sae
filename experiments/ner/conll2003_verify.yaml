@@ -1,0 +1,17 @@
+experiment_name: "ner_conll2003_verify"
+output_dir: "results/ner_verify"
+
+data:
+  dataset_name: "conll2003"
+  train_samples: 200
+  test_samples: 100
+
+model:
+  name: "answerdotai/ModernBERT-base"
+
+evaluation:
+  seeds: [42]
+
+training:
+  sparsity_target: 0.1
+  warmup_fraction: 0.2

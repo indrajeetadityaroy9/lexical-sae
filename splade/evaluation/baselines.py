@@ -30,7 +30,8 @@ def dla_attribution(
     """
     _model = unwrap_compiled(model)
     with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        _, sparse_vector, W_eff, _ = _model(input_ids, attention_mask)
+        sparse_seq = _model(input_ids, attention_mask)
+        _, sparse_vector, W_eff, _ = _model.classify(sparse_seq, attention_mask)
     return compute_attribution_tensor(sparse_vector, W_eff, target_classes).float()
 
 
@@ -50,7 +51,8 @@ def gradient_attribution(
     _model = unwrap_compiled(model)
 
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        _, sparse_vector, _, _ = _model(input_ids, attention_mask)
+        sparse_seq = _model(input_ids, attention_mask)
+        sparse_vector = _model.to_pooled(sparse_seq, attention_mask)
 
     sparse_vector = sparse_vector.detach().float().requires_grad_(True)
     logits = _model.classifier_logits_only(sparse_vector)
@@ -80,7 +82,8 @@ def integrated_gradients_attribution(
     _model = unwrap_compiled(model)
 
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        _, sparse_vector, _, _ = _model(input_ids, attention_mask)
+        sparse_seq = _model(input_ids, attention_mask)
+        sparse_vector = _model.to_pooled(sparse_seq, attention_mask)
 
     sparse_vector = sparse_vector.detach().float()
     batch_indices = torch.arange(len(target_classes), device=sparse_vector.device)
@@ -112,13 +115,16 @@ def _get_last_layer_cls_attention(
     Returns:
         (cls_attn [B, L], hidden_output [B, L, H])
     """
-    bert = model.bert
+    encoder = model.encoder
 
     # Get last transformer layer
-    if hasattr(bert, "transformer"):
-        layers = list(bert.transformer.layer)
-    elif hasattr(bert, "encoder"):
-        layers = list(bert.encoder.layer)
+    if hasattr(encoder, "transformer"):
+        layers = list(encoder.transformer.layer)
+    elif hasattr(encoder, "encoder"):
+        layers = list(encoder.encoder.layer)
+    elif hasattr(encoder, "layers"):
+        # ModernBERT: encoder.layers
+        layers = list(encoder.layers)
     else:
         raise ValueError("Unknown BERT architecture")
     last_layer = layers[-1]
@@ -132,27 +138,36 @@ def _get_last_layer_cls_attention(
     handle = last_layer.register_forward_pre_hook(_capture)
     try:
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            bert_output = bert(input_ids=input_ids, attention_mask=attention_mask)
+            encoder_output = encoder(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         handle.remove()
 
     hidden_in = captured["hidden"]  # Input to last layer [B, L, H]
-    hidden_out = bert_output.last_hidden_state  # Output [B, L, H]
+    hidden_out = encoder_output.last_hidden_state  # Output [B, L, H]
 
     # Compute Q, K from the last layer's attention module
-    attn_mod = last_layer.attention
-    if hasattr(attn_mod, "q_lin"):  # DistilBERT
+    if hasattr(last_layer, "attn") and hasattr(last_layer.attn, "Wqkv"):
+        # ModernBERT: fused QKV projection
+        attn_mod = last_layer.attn
         with torch.inference_mode():
-            Q = attn_mod.q_lin(hidden_in)
-            K = attn_mod.k_lin(hidden_in)
-        n_heads = attn_mod.n_heads
-    elif hasattr(attn_mod, "self"):  # BERT/RoBERTa
-        with torch.inference_mode():
-            Q = attn_mod.self.query(hidden_in)
-            K = attn_mod.self.key(hidden_in)
-        n_heads = attn_mod.self.num_attention_heads
+            qkv = attn_mod.Wqkv(hidden_in)  # [B, L, 3 * D]
+        D = qkv.shape[-1] // 3
+        Q, K, _ = qkv.split(D, dim=-1)
+        n_heads = encoder.config.num_attention_heads
     else:
-        raise ValueError("Unknown attention module structure")
+        attn_mod = last_layer.attention
+        if hasattr(attn_mod, "q_lin"):  # DistilBERT
+            with torch.inference_mode():
+                Q = attn_mod.q_lin(hidden_in)
+                K = attn_mod.k_lin(hidden_in)
+            n_heads = attn_mod.n_heads
+        elif hasattr(attn_mod, "self"):  # BERT/RoBERTa
+            with torch.inference_mode():
+                Q = attn_mod.self.query(hidden_in)
+                K = attn_mod.self.key(hidden_in)
+            n_heads = attn_mod.self.num_attention_heads
+        else:
+            raise ValueError("Unknown attention module structure")
 
     B, L, D = Q.shape
     d_k = D // n_heads
@@ -188,20 +203,16 @@ def attention_attribution(
     """
     _model = unwrap_compiled(model)
 
-    cls_attn, hidden = _get_last_layer_cls_attention(
+    cls_attn, _ = _get_last_layer_cls_attention(
         _model, input_ids, attention_mask,
     )
 
+    # Get per-position sparse representations via backbone (second encoder pass)
     with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        # Compute per-position sparse contributions
-        transformed = _model.vocab_transform(hidden)
-        transformed = torch.nn.functional.gelu(transformed)
-        transformed = _model.vocab_layer_norm(transformed)
-        mlm_logits = _model.vocab_projector(transformed)
-        activated = _model.activation(mlm_logits)
-        log_act = torch.log1p(activated)  # [B, L, V]
-        log_act = log_act.masked_fill(~attention_mask.unsqueeze(-1).bool(), 0.0)
+        sparse_sequence = _model._compute_sparse_sequence(
+            attention_mask, input_ids=input_ids,
+        )  # [B, L, V]
 
     # Attention-weighted sum (instead of max-pooling)
-    attn_sparse = (cls_attn.unsqueeze(-1) * log_act.float()).sum(dim=1)  # [B, V]
+    attn_sparse = (cls_attn.unsqueeze(-1) * sparse_sequence.float()).sum(dim=1)  # [B, V]
     return attn_sparse

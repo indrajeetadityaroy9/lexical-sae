@@ -26,8 +26,8 @@ from splade.training.optim import (_gradient_centralization,
                                    _infer_batch_size, _LRScheduler, find_lr)
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE, unwrap_compiled
 
-_NUM_WORKERS = min(os.cpu_count() or 4, 8)
-_PREFETCH_FACTOR = 2
+_NUM_WORKERS = min(os.cpu_count() or 4, 16)
+_PREFETCH_FACTOR = 4
 
 
 class ModelEMA:
@@ -82,7 +82,7 @@ def train_model(
     warmup_fraction: float = 0.2,
 ) -> "AttributionCentroidTracker":
     if max_length is None:
-        max_length = infer_max_length(texts, tokenizer)
+        max_length = infer_max_length(texts, tokenizer, model_name=model_name)
     if batch_size is None:
         batch_size = _infer_batch_size(model_name, max_length)
 
@@ -122,7 +122,7 @@ def train_model(
     lr_scheduler = _LRScheduler(optimal_lr, total_steps, warmup_steps)
 
     _orig = unwrap_compiled(model)
-    vocab_size = _orig.padded_vocab_size
+    vocab_size = _orig.vocab_size
     classifier_params = set(_orig.classifier_parameters())
 
     criterion = (
@@ -181,7 +181,8 @@ def train_model(
             optimizer.zero_grad(set_to_none=True)
 
             with torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-                logits, sparse, W_eff, _ = model(batch_ids, batch_mask)
+                sparse_seq = model(batch_ids, batch_mask)
+                logits, sparse, W_eff, _ = _orig.classify(sparse_seq, batch_mask)
                 classification_loss = (
                     criterion(logits.squeeze(-1), batch_labels)
                     if num_labels == 1
@@ -255,7 +256,8 @@ def train_model(
         model.eval()
         with torch.inference_mode():
             with torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-                val_logits, _, _, _ = model(val_ids_gpu, val_mask_gpu)
+                val_sparse_seq = model(val_ids_gpu, val_mask_gpu)
+                val_logits = _orig.classify(val_sparse_seq, val_mask_gpu).logits
                 val_loss = (
                     criterion(val_logits.squeeze(-1), val_label_gpu)
                     if num_labels == 1

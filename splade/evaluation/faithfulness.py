@@ -31,7 +31,7 @@ def compute_removability(
     labels: list[int],
     max_length: int,
     top_k: int = 5,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> dict:
     """Remove top-k DLA-attributed tokens from sparse vector, measure prediction flip rate.
 
@@ -156,7 +156,7 @@ def compare_with_baseline_explainer(
     labels: list[int],
     max_length: int,
     top_k: int = 5,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> dict[str, dict]:
     """Run removability for DLA + all baseline explainers.
 

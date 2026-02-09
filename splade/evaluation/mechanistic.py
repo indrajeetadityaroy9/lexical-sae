@@ -46,19 +46,16 @@ def _run_sae_comparison(
 
     with torch.inference_mode():
         classifier_weight = _model.classifier_fc2.weight
-        vocab_projector_weight = _model.vocab_projector.weight
+        vocab_projector_weight = _model.backbone.get_output_embeddings().weight
 
     dla_active_counts = []
     sae_active_counts = []
 
     for input_ids, attention_mask, label in zip(input_ids_list, attention_mask_list, labels):
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, sparse_vector, _, _ = _model(input_ids, attention_mask)
-            bert_output = _model.bert(input_ids=input_ids, attention_mask=attention_mask)
-            hidden = bert_output.last_hidden_state
-            transformed = _model.vocab_transform(hidden)
-            transformed = torch.nn.functional.gelu(transformed)
-            transformed = _model.vocab_layer_norm(transformed)
+            sparse_seq = _model(input_ids, attention_mask)
+            sparse_vector = _model.to_pooled(sparse_seq, attention_mask)
+            transformed = _model._get_mlm_head_input(input_ids, attention_mask)
             cls_hidden = transformed[:, 0, :]
 
         # DLA active count
@@ -76,12 +73,8 @@ def _run_sae_comparison(
     all_hidden = []
     for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            bert_output = _model.bert(input_ids=input_ids, attention_mask=attention_mask)
-            hidden = bert_output.last_hidden_state
-            transformed = _model.vocab_transform(hidden)
-            transformed = torch.nn.functional.gelu(transformed)
-            transformed = _model.vocab_layer_norm(transformed)
-        all_hidden.append(transformed[:, 0, :].detach().float())
+            transformed = _model._get_mlm_head_input(input_ids, attention_mask)
+        all_hidden.append(transformed[:, 0, :].float())
 
     hidden_tensor = torch.cat(all_hidden, dim=0)
     with torch.inference_mode():
@@ -125,7 +118,8 @@ def run_mechanistic_evaluation(
         batch_labels_t = torch.tensor(labels[start:end], device=DEVICE)
 
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            logits, sparse_vector, W_eff, b_eff = _model(batch_ids, batch_mask)
+            sparse_seq = _model(batch_ids, batch_mask)
+            logits, sparse_vector, W_eff, b_eff = _model.classify(sparse_seq, batch_mask)
 
         preds = logits.argmax(dim=-1)
         correct += (preds == batch_labels_t).sum().item()

@@ -10,7 +10,7 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "distilbert-base-uncased"
+    name: str = "answerdotai/ModernBERT-base"
 
 
 @dataclass

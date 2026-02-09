@@ -7,7 +7,7 @@ data:
   test_samples: -1   # full split: 872
 
 model:
-  name: "distilbert-base-uncased"
+  name: "answerdotai/ModernBERT-base"
 
 evaluation:
   seeds: [42]

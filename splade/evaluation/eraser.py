@@ -58,7 +58,7 @@ def compute_comprehensiveness(
     Higher comprehensiveness = more faithful (removing important features hurts).
 
     Args:
-        model: CISModel (or compiled wrapper).
+        model: LexicalSAE (or compiled wrapper).
         sparse_vectors: [N, V] pre-computed sparse activations.
         attributions: [N, V] pre-computed DLA attributions.
         labels: [N] ground-truth class indices.
@@ -105,7 +105,7 @@ def compute_sufficiency(
     Lower sufficiency = more faithful (keeping important features is enough).
 
     Args:
-        model: CISModel (or compiled wrapper).
+        model: LexicalSAE (or compiled wrapper).
         sparse_vectors: [N, V] pre-computed sparse activations.
         attributions: [N, V] pre-computed DLA attributions.
         labels: [N] ground-truth class indices.
@@ -176,7 +176,8 @@ def run_eraser_evaluation(
         batch_labels = labels_t[start:end]
 
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, sparse_vector, W_eff, _ = _model(batch_ids, batch_mask)
+            sparse_seq = _model(batch_ids, batch_mask)
+            _, sparse_vector, W_eff, _ = _model.classify(sparse_seq, batch_mask)
 
         attr = compute_attribution_tensor(sparse_vector, W_eff, batch_labels)
         all_sparse.append(sparse_vector.float())

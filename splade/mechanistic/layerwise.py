@@ -23,13 +23,16 @@ _LAYERWISE_SAMPLES = 100
 
 def _get_transformer_layers(model: torch.nn.Module) -> list[torch.nn.Module]:
     """Get the list of transformer layers from the BERT encoder."""
-    bert = model.bert
-    if hasattr(bert, "transformer"):
-        # DistilBERT: bert.transformer.layer
-        return list(bert.transformer.layer)
-    elif hasattr(bert, "encoder"):
-        # BERT/RoBERTa: bert.encoder.layer
-        return list(bert.encoder.layer)
+    encoder = model.encoder
+    if hasattr(encoder, "transformer"):
+        # DistilBERT: encoder.transformer.layer
+        return list(encoder.transformer.layer)
+    elif hasattr(encoder, "encoder"):
+        # BERT/RoBERTa: encoder.encoder.layer
+        return list(encoder.encoder.layer)
+    elif hasattr(encoder, "layers"):
+        # ModernBERT: encoder.layers
+        return list(encoder.layers)
     else:
         raise ValueError("Unknown BERT architecture: cannot find transformer layers")
 
@@ -45,7 +48,7 @@ def decompose_sparse_vector_by_layer(
     measures the change in sparse_vector.
 
     Args:
-        model: CISModel.
+        model: LexicalSAE.
         input_ids: [B, L] token IDs.
         attention_mask: [B, L] attention mask.
 
@@ -58,7 +61,8 @@ def decompose_sparse_vector_by_layer(
 
     # Clean forward pass
     with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        _, sparse_clean, _, _ = _model(input_ids, attention_mask)
+        sparse_seq_clean = _model(input_ids, attention_mask)
+        sparse_clean = _model.to_pooled(sparse_seq_clean, attention_mask)
     sparse_clean = sparse_clean.float()
 
     V = sparse_clean.shape[1]
@@ -79,7 +83,8 @@ def decompose_sparse_vector_by_layer(
         hook_handle = layers[layer_idx].register_forward_hook(_zero_layer_hook)
         try:
             with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-                _, sparse_ablated, _, _ = _model(input_ids, attention_mask)
+                sparse_seq_ablated = _model(input_ids, attention_mask)
+                sparse_ablated = _model.to_pooled(sparse_seq_ablated, attention_mask)
             sparse_ablated = sparse_ablated.float()
             contributions[:, layer_idx, :] = sparse_clean - sparse_ablated
         finally:
@@ -101,7 +106,7 @@ def compute_layerwise_attribution(
         layer_importance[b, l] = sum_j |end_to_end[b, l, j]|
 
     Args:
-        model: CISModel.
+        model: LexicalSAE.
         input_ids: [B, L] token IDs.
         attention_mask: [B, L] attention mask.
         target_classes: [B] class indices.
@@ -116,7 +121,8 @@ def compute_layerwise_attribution(
 
     # Get W_eff for the target class
     with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-        _, _, W_eff, _ = _model(input_ids, attention_mask)
+        sparse_seq = _model(input_ids, attention_mask)
+        W_eff = _model.classify(sparse_seq, attention_mask).W_eff
 
     device = W_eff.device
     batch_indices = torch.arange(len(target_classes), device=device)
@@ -167,7 +173,8 @@ def run_layerwise_evaluation(
         reconstructed = contributions.sum(dim=1)  # [B, V]
 
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, sparse_actual, _, _ = _model(batch_ids, batch_mask)
+            sparse_seq_actual = _model(batch_ids, batch_mask)
+            sparse_actual = _model.to_pooled(sparse_seq_actual, batch_mask)
         sparse_actual = sparse_actual.float()
 
         error = (sparse_actual - reconstructed).abs().sum(dim=-1)

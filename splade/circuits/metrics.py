@@ -44,7 +44,7 @@ def extract_vocabulary_circuit(
     if precomputed_attributions is not None:
         mean_attributions = precomputed_attributions
     else:
-        vocab_size = _model.padded_vocab_size
+        vocab_size = _model.vocab_size
         token_attribution_sums = torch.zeros(vocab_size, device=DEVICE)
         n_examples = 0
         eval_batch = 32
@@ -56,7 +56,8 @@ def extract_vocabulary_circuit(
             bs = end - start
 
             with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-                _, sparse_vector, W_eff, _ = _model(batch_ids, batch_mask)
+                sparse_seq = _model(batch_ids, batch_mask)
+                _, sparse_vector, W_eff, _ = _model.classify(sparse_seq, batch_mask)
 
             class_labels_t = torch.full((bs,), class_idx, device=DEVICE)
             attr = compute_attribution_tensor(sparse_vector, W_eff, class_labels_t)
@@ -111,7 +112,7 @@ def measure_circuit_completeness(
     whether the circuit captures the features needed to classify that class.
     """
     _model = unwrap_compiled(model)
-    vocab_size = _model.padded_vocab_size
+    vocab_size = _model.vocab_size
     circuit_set = set(circuit.token_ids)
     non_circuit_ids = [i for i in range(vocab_size) if i not in circuit_set]
 
@@ -136,7 +137,8 @@ def measure_circuit_completeness(
         batch_labels_t = torch.tensor(class_labels[start:end], device=DEVICE)
 
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, original_sparse, _, _ = _model(batch_ids, batch_mask)
+            sparse_seq = _model(batch_ids, batch_mask)
+            original_sparse = _model.to_pooled(sparse_seq, batch_mask)
             patched_sparse = original_sparse.clone()
             patched_sparse[:, non_circuit_ids_t] = 0.0
             patched_logits = _model.classifier_logits_only(patched_sparse)
@@ -187,7 +189,8 @@ def measure_separation_jaccard(
         batch_labels_t = torch.tensor(batch_labels_slice, device=DEVICE)
 
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            _, sparse_vector, W_eff, _ = _model(batch_ids, batch_mask)
+            sparse_seq = _model(batch_ids, batch_mask)
+            _, sparse_vector, W_eff, _ = _model.classify(sparse_seq, batch_mask)
 
         attr = compute_attribution_tensor(sparse_vector, W_eff, batch_labels_t)
 

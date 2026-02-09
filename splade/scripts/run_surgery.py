@@ -16,7 +16,7 @@ from splade.config.load import load_config
 from splade.data.loader import load_civilcomments_with_identity
 from splade.inference import score_model
 from splade.intervene import (
-    SuppressedCISModel,
+    SuppressedModel,
     evaluate_bias,
     get_top_tokens,
     suppress_tokens_by_name,
@@ -74,7 +74,8 @@ def main() -> None:
         print(f"{'Token':<20} {'Score':>10}")
         print("-" * 30)
         for token, score in top_tokens[:20]:
-            marker = " *" if token.lower().strip("##") in IDENTITY_TOKEN_CANDIDATES else ""
+            clean_token = token.lower().lstrip("\u0120").strip("##")
+            marker = " *" if clean_token in IDENTITY_TOKEN_CANDIDATES else ""
             print(f"{token:<20} {score:>10.4f}{marker}")
         print("(* = identity-correlated)")
 
@@ -98,7 +99,7 @@ def main() -> None:
     print(f"\n--- Suppressing {len(tokens_to_suppress)} identity tokens ---")
     token_ids = exp.tokenizer.convert_tokens_to_ids(tokens_to_suppress)
     token_ids = [tid for tid in token_ids if tid != exp.tokenizer.unk_token_id]
-    suppressed_model = SuppressedCISModel(exp.model, token_ids)
+    suppressed_model = SuppressedModel(exp.model, token_ids)
 
     # Evaluate AFTER suppression
     print("\n--- Bias evaluation AFTER suppression ---")

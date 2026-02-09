@@ -5,8 +5,12 @@ Since logit[c] = sum_j s[j] * W_eff[c,j] + b_eff[c], zeroing s[j]
 removes token j's contribution to ALL classes with mathematical certainty.
 
 Two mechanisms:
-  1. Global suppression via weight surgery (permanent, modifies vocab_projector)
-  2. Inference-time suppression via SuppressedCISModel wrapper (reversible)
+  1. Global suppression via weight surgery (permanent, modifies output embeddings)
+  2. Inference-time suppression via SuppressedModel wrapper (reversible)
+
+Note: If the backbone uses tied weights (most MLMs do), global suppression
+also zeroes the input embedding, effectively removing the concept entirely
+from the model's universe — consistent with "lobotomy" semantics.
 """
 
 import torch
@@ -19,25 +23,36 @@ from splade.utils.cuda import COMPUTE_DTYPE, DEVICE, unwrap_compiled
 def get_clean_vocab_mask(tokenizer) -> torch.Tensor:
     """Return a boolean mask selecting whole-word, non-special tokens.
 
-    Filters out special tokens ([CLS], [SEP], [PAD], [UNK], [MASK]),
-    subword continuations (## prefix for BERT/DistilBERT), and single
-    alphanumeric characters. This ensures surgery demos and top-token
-    displays show human-interpretable concepts, not tokenizer artifacts.
+    Filters out special tokens, subword continuations, and single
+    alphanumeric characters. Handles both WordPiece (## prefix for
+    BERT/DistilBERT) and byte-level BPE (Ġ prefix for ModernBERT/
+    RoBERTa) tokenizers.
     """
     vocab_size = tokenizer.vocab_size
     mask = torch.ones(vocab_size, dtype=torch.bool)
 
     special_ids = set(tokenizer.all_special_ids)
-    for token, tid in tokenizer.get_vocab().items():
+    vocab = tokenizer.get_vocab()
+
+    # Detect tokenizer type: WordPiece uses ##, BPE uses Ġ (U+0120) prefix
+    sample_tokens = list(vocab.keys())[:2000]
+    has_wordpiece = any(t.startswith("##") for t in sample_tokens)
+
+    for token, tid in vocab.items():
         if tid >= vocab_size:
             continue
         if tid in special_ids:
             mask[tid] = False
-        elif token.startswith("##"):
+        elif has_wordpiece and token.startswith("##"):
+            # WordPiece subword continuation
+            mask[tid] = False
+        elif not has_wordpiece and token.isalpha() and not token.startswith("\u0120"):
+            # BPE continuation token (alphabetic, no space prefix)
             mask[tid] = False
         elif token.startswith("[unused"):
             mask[tid] = False
-        elif len(token) == 1 and token.isalnum():
+        elif len(token.lstrip("\u0120")) <= 1 and token.lstrip("\u0120").isalnum():
+            # Single character (stripping Ġ prefix if present)
             mask[tid] = False
 
     return mask
@@ -82,19 +97,20 @@ def get_top_tokens(
 def suppress_token_globally(model: nn.Module, token_id: int) -> None:
     """Permanently remove a token from the model's vocabulary.
 
-    Zeros the vocab_projector weights for this token, guaranteeing that
+    Zeros the output embedding weights for this token, guaranteeing that
     s[token_id] = 0 for all inputs. This is an irreversible, verifiable
     safety guarantee: the concept cannot influence any class.
 
-    Mathematical guarantee: If vocab_projector.weight[token_id, :] = 0
-    and vocab_projector.bias[token_id] = 0, then the MLM logit for this
-    token is always 0, so after DReLU (which has threshold >= 0),
-    s[token_id] = 0 for all inputs.
+    Mathematical guarantee: If the output projection weight[token_id, :] = 0
+    and bias[token_id] = 0, then the MLM logit for this token is always 0,
+    so after DReLU (which has threshold >= 0), s[token_id] = 0 for all inputs.
     """
     _model = unwrap_compiled(model)
+    output_emb = _model.backbone.get_output_embeddings()
     with torch.no_grad():
-        _model.vocab_projector.weight[token_id, :] = 0
-        _model.vocab_projector.bias[token_id] = 0
+        output_emb.weight[token_id, :] = 0
+        if output_emb.bias is not None:
+            output_emb.bias[token_id] = 0
         _model.activation.theta[token_id] = 1e6  # ensure DReLU blocks it
 
 
@@ -113,23 +129,23 @@ def suppress_tokens_by_name(
     return suppressed
 
 
-class SuppressedCISModel(nn.Module):
-    """Inference-time wrapper that masks tokens in the sparse vector.
+class SuppressedModel(nn.Module):
+    """Inference-time wrapper that masks tokens in the sparse sequence.
 
     Unlike global suppression, this is reversible and does not modify
     the underlying model weights. Useful for experimentation.
 
-    The suppression mask zeros specified dimensions of the sparse vector
-    before classification. Since logit[c] = sum_j s[j] * W_eff[c,j] + b_eff[c],
-    this cleanly removes the masked tokens' contributions while preserving
-    the exact DLA identity for remaining tokens.
+    The suppression mask zeros specified dimensions of the sparse sequence
+    before any task-specific processing. Since logit[c] = sum_j s[j] * W_eff[c,j]
+    + b_eff[c], this cleanly removes the masked tokens' contributions while
+    preserving the exact DLA identity for remaining tokens.
     """
 
     def __init__(self, model: nn.Module, suppressed_token_ids: list[int]):
         super().__init__()
         self.model = model
         _orig = unwrap_compiled(model)
-        mask = torch.ones(_orig.padded_vocab_size, device=DEVICE)
+        mask = torch.ones(_orig.vocab_size, device=DEVICE)
         for tid in suppressed_token_ids:
             mask[tid] = 0.0
         self.register_buffer("keep_mask", mask)
@@ -138,19 +154,42 @@ class SuppressedCISModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Returns [B, L, V] sparse sequence with suppressed tokens zeroed."""
+        sparse_seq = self.model(input_ids, attention_mask)
+        return sparse_seq * self.keep_mask
+
+    def classify(
+        self,
+        sparse_sequence: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> CircuitState:
-        logits, sparse, W_eff, b_eff = self.model(input_ids, attention_mask)
-        clean_sparse = sparse * self.keep_mask
+        """Max-pool and classify (delegates to underlying model)."""
         _orig = unwrap_compiled(self.model)
-        new_logits, new_W_eff, new_b_eff = _orig.classifier_forward(clean_sparse)
-        return CircuitState(new_logits, clean_sparse, new_W_eff, new_b_eff)
+        return _orig.classify(sparse_sequence, attention_mask)
+
+    def tag(self, sparse_sequence: torch.Tensor) -> torch.Tensor:
+        """Per-position logits [B, L, C] (delegates to underlying model)."""
+        _orig = unwrap_compiled(self.model)
+        return _orig.tag(sparse_sequence)
+
+    @staticmethod
+    def to_pooled(
+        sparse_sequence: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        from splade.models.lexical_sae import LexicalSAE
+        return LexicalSAE.to_pooled(sparse_sequence, attention_mask)
 
     @property
-    def padded_vocab_size(self):
-        return unwrap_compiled(self.model).padded_vocab_size
+    def vocab_size(self):
+        return unwrap_compiled(self.model).vocab_size
 
     def classifier_logits_only(self, sparse_vector: torch.Tensor) -> torch.Tensor:
         return unwrap_compiled(self.model).classifier_logits_only(sparse_vector)
+
+    def classifier_forward(self, sparse_vector: torch.Tensor):
+        return unwrap_compiled(self.model).classifier_forward(sparse_vector)
 
     def classifier_parameters(self):
         return unwrap_compiled(self.model).classifier_parameters()
@@ -163,7 +202,7 @@ def evaluate_bias(
     labels: list[int],
     identities: list[dict[str, bool]],
     max_length: int,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> dict:
     """Compute accuracy and false positive rate broken down by identity group.
 

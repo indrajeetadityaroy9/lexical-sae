@@ -3,8 +3,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from splade.mechanistic.attribution import compute_attribution_tensor
 
-SPECIAL_TOKENS = {"[CLS]", "[SEP]", "[UNK]", "[MASK]", "[PAD]"}
-from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
+from splade.utils.cuda import COMPUTE_DTYPE, DEVICE, unwrap_compiled
+
+
+def _get_special_tokens(tokenizer) -> set[str]:
+    """Build special token set dynamically from tokenizer."""
+    return set(tokenizer.all_special_tokens)
 
 def _run_inference_loop(
     model: torch.nn.Module,
@@ -12,7 +16,7 @@ def _run_inference_loop(
     attention_mask: torch.Tensor,
     extract_sparse: bool = False,
     extract_weff: bool = False,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     loader = DataLoader(
         TensorDataset(input_ids, attention_mask),
@@ -24,12 +28,14 @@ def _run_inference_loop(
     all_logits = []
     all_sparse = [] if extract_sparse else None
     all_weff = [] if extract_weff else None
+    _orig = unwrap_compiled(model)
 
     with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
         for batch_ids, batch_mask in loader:
             batch_ids = batch_ids.to(DEVICE, non_blocking=True)
             batch_mask = batch_mask.to(DEVICE, non_blocking=True)
-            logits, sparse, w_eff, _ = model(batch_ids, batch_mask)
+            sparse_seq = model(batch_ids, batch_mask)
+            logits, sparse, w_eff, _ = _orig.classify(sparse_seq, batch_mask)
             all_logits.append(logits.clone())
             if extract_sparse:
                 all_sparse.append(sparse.clone())
@@ -41,14 +47,14 @@ def _run_inference_loop(
     weff = torch.cat(all_weff, dim=0) if extract_weff else None
     return logits, sparse, weff
 
-def _predict_model(model, tokenizer, texts: list[str], max_length: int, batch_size: int = 32, num_labels: int = 2) -> list[int]:
+def _predict_model(model, tokenizer, texts: list[str], max_length: int, batch_size: int = 64, num_labels: int = 2) -> list[int]:
     encoding = tokenizer(texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
     logits, _, _ = _run_inference_loop(model, encoding["input_ids"], encoding["attention_mask"], batch_size=batch_size)
     if num_labels == 1:
         return (logits.squeeze(-1) > 0).int().tolist()
     return logits.argmax(dim=1).tolist()
 
-def predict_proba_model(model, tokenizer, texts: list[str], max_length: int, batch_size: int = 32, num_labels: int = 2) -> list[list[float]]:
+def predict_proba_model(model, tokenizer, texts: list[str], max_length: int, batch_size: int = 64, num_labels: int = 2) -> list[list[float]]:
     encoding = tokenizer(texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
     logits, _, _ = _run_inference_loop(model, encoding["input_ids"], encoding["attention_mask"], batch_size=batch_size)
     if num_labels == 1:
@@ -58,7 +64,7 @@ def predict_proba_model(model, tokenizer, texts: list[str], max_length: int, bat
         probabilities = torch.nn.functional.softmax(logits, dim=-1)
     return probabilities.tolist()
 
-def score_model(model, tokenizer, texts: list[str], labels: list[int], max_length: int, batch_size: int = 32, num_labels: int = 2) -> float:
+def score_model(model, tokenizer, texts: list[str], labels: list[int], max_length: int, batch_size: int = 64, num_labels: int = 2) -> float:
     preds = _predict_model(model, tokenizer, texts, max_length, batch_size, num_labels)
     return sum(p == t for p, t in zip(preds, labels)) / len(labels)
 
@@ -106,11 +112,12 @@ def explain_model(
 
     ranked_indices = torch.cat([positive_indices, negative_indices])
 
+    special_tokens = _get_special_tokens(tokenizer)
     explanations = []
     for index in ranked_indices:
         idx_int = index.item()
         token = tokenizer.convert_ids_to_tokens(idx_int)
-        if token not in SPECIAL_TOKENS:
+        if token not in special_tokens:
             explanations.append((token, float(contributions[idx_int].item())))
         if len(explanations) >= top_k:
             break
@@ -125,7 +132,7 @@ def explain_model_batch(
     max_length: int,
     top_k: int = 10,
     input_only: bool = False,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> list[list[tuple[str, float]]]:
     encoding = tokenizer(texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt")
     logits, sparse, W_eff = _run_inference_loop(
@@ -144,6 +151,7 @@ def explain_model_batch(
             set(tokenizer.encode(text, add_special_tokens=False)) for text in texts
         ]
 
+    special_tokens = _get_special_tokens(tokenizer)
     all_explanations = []
     for idx in range(len(texts)):
         contributions = all_contributions[idx]
@@ -176,7 +184,7 @@ def explain_model_batch(
         for index in ranked_indices:
             idx_int = index.item()
             token = tokenizer.convert_ids_to_tokens(idx_int)
-            if token not in SPECIAL_TOKENS:
+            if token not in special_tokens:
                 explanations.append((token, float(contributions[idx_int].item())))
             if len(explanations) >= top_k:
                 break

@@ -38,7 +38,7 @@ def train_sae_on_splade(
 ) -> SimpleSAE:
     """Train an SAE on BERT hidden states at the vocabulary projection layer.
 
-    Collects hidden states from the model's vocab_transform output,
+    Collects transformed hidden states (input to the output projection layer)
     then trains an overcomplete SAE to reconstruct them.
     """
     overcompleteness = 4
@@ -48,17 +48,13 @@ def train_sae_on_splade(
     batch_size = 64
     _model = unwrap_compiled(model)
 
-    # Collect hidden states (kept on GPU)
+    # Collect hidden states (kept on GPU) via architecture-agnostic hook
     all_hidden = []
     for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
         with torch.inference_mode(), torch.amp.autocast("cuda", dtype=COMPUTE_DTYPE):
-            bert_output = _model.bert(input_ids=input_ids, attention_mask=attention_mask)
-            hidden = bert_output.last_hidden_state
-            transformed = _model.vocab_transform(hidden)
-            transformed = torch.nn.functional.gelu(transformed)
-            transformed = _model.vocab_layer_norm(transformed)
+            transformed = _model._get_mlm_head_input(input_ids, attention_mask)
         # Use CLS token representation, keep on GPU
-        all_hidden.append(transformed[:, 0, :].detach().float())
+        all_hidden.append(transformed[:, 0, :].float())
 
     hidden_states = torch.cat(all_hidden, dim=0)
     input_dim = hidden_states.shape[-1]
@@ -110,7 +106,7 @@ def compute_sae_attribution(
     sae_features_flat = sae_features.squeeze()  # [hidden_dim]
 
     # Full pathway: SAE feature -> decoder (hidden_dim -> hidden_size)
-    #   -> vocab_projector (hidden_size -> padded_vocab_size) -> classifier_fc2 row
+    #   -> output projection (hidden_size -> vocab_size) -> classifier_fc2 row
     # Note: SAE operates on hidden states before the ReLU MLP, so we use
     # classifier_fc2.weight directly (not W_eff) for this comparison.
     proj = decoder_weight.T @ vocab_projector_weight.T @ classifier_weight[class_idx]  # [hidden_dim]

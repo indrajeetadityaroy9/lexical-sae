@@ -47,13 +47,13 @@ class FakeBERT(torch.nn.Module):
         return Output()
 
 
-class FakeCISModelWithBERT(torch.nn.Module):
-    """Minimal CISModel with fake BERT for testing layerwise decomposition."""
+class FakeLexicalSAEWithBERT(torch.nn.Module):
+    """Minimal LexicalSAE with fake BERT for testing layerwise decomposition."""
 
     def __init__(self, hidden_size=64, vocab_size=100, num_layers=3, num_labels=2):
         super().__init__()
-        self.bert = FakeBERT(hidden_size, vocab_size, num_layers)
-        self.padded_vocab_size = vocab_size
+        self._encoder = FakeBERT(hidden_size, vocab_size, num_layers)
+        self.vocab_size = vocab_size
         self.vocab_transform = torch.nn.Linear(hidden_size, hidden_size)
         self.vocab_projector = torch.nn.Linear(hidden_size, vocab_size)
         self.vocab_layer_norm = torch.nn.LayerNorm(hidden_size)
@@ -66,8 +66,12 @@ class FakeCISModelWithBERT(torch.nn.Module):
 
         self.activation = _DReLU()
 
+    @property
+    def encoder(self):
+        return self._encoder
+
     def forward(self, input_ids, attention_mask):
-        hidden = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        hidden = self._encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         transformed = self.vocab_transform(hidden)
         transformed = torch.nn.functional.gelu(transformed)
         transformed = self.vocab_layer_norm(transformed)
@@ -99,7 +103,7 @@ class FakeCISModelWithBERT(torch.nn.Module):
 @pytest.fixture
 def model():
     torch.manual_seed(42)
-    return FakeCISModelWithBERT(num_layers=3)
+    return FakeLexicalSAEWithBERT(num_layers=3)
 
 
 @pytest.fixture

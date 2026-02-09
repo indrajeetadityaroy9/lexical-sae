@@ -35,12 +35,20 @@ def _shuffle_and_truncate(
     return list(shuffled_texts)[:max_samples], list(shuffled_labels)[:max_samples]
 
 
-def infer_max_length(texts: list[str], tokenizer) -> int:
+def infer_max_length(texts: list[str], tokenizer, model_name: str | None = None) -> int:
     sample = texts[:500]
     lengths = [len(tokenizer.encode(t, add_special_tokens=True)) for t in sample]
     p99 = int(numpy.percentile(lengths, 99))
     aligned = ((p99 + 7) // 8) * 8
-    return max(64, min(512, aligned))
+
+    if model_name is not None:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_name)
+        max_pos = getattr(config, "max_position_embeddings", 512)
+    else:
+        max_pos = 512
+
+    return max(64, min(max_pos, aligned))
 
 
 def _load_split(cfg: dict, split: str, max_samples: int, seed: int) -> tuple[list[str], list[int]]:
