@@ -8,24 +8,6 @@ CIS repurposes SPLADE's sparse lexical bottleneck for classification and exploit
 
 ## Method
 
-### Architecture
-
-```
-                                      SPLADE Head
-                                   .------------------.
-Input --> BERT Encoder --> GELU --> LayerNorm --> W_proj --> DReLU(theta) --> log(1+x) --> MaxPool
-                                                                                           |
-                                                                                    s in R^V (sparse)
-                                                                                           |
-                                                          ReLU MLP Classifier              |
-                                                     .-------------------------.           |
-                                                     | FC1(V,256) -> ReLU      |<----------'
-                                                     | FC2(256,C)              |
-                                                     '-------------------------'
-                                                               |
-                                                     (logits, s, W_eff, b_eff)
-```
-
 The ReLU activation mask `D(s) = diag(1[W1*s + b1 > 0])` yields an exact per-input effective weight matrix:
 
 ```
