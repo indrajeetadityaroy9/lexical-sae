@@ -4,8 +4,6 @@
 
 CIS repurposes SPLADE's sparse lexical bottleneck for classification and exploits the resulting piecewise-linear structure to obtain **exact** per-token attribution from a single forward pass. Three differentiable circuit losses---computed by the *same function* used for evaluation---are optimized during training via constrained Lagrangian optimization, producing models with cleaner internal circuits without sacrificing accuracy.
 
-[[Paper]](#citation) [[Results]](#results)
-
 ---
 
 ## Method
