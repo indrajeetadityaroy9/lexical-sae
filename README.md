@@ -8,7 +8,7 @@ Lexical-SAE is a general-purpose interpretability architecture that repurposes t
 
 ## Key Results
 
-### Named Entity Recognition (CoNLL-2003)
+### Named Entity Recognition (CoNLL)
 *Backbone: ModernBERT-base | Context: 128 tokens*
 
 | Metric | Value | SOTA Context |
