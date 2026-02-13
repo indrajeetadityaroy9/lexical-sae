@@ -41,7 +41,7 @@ def _run_variant(config, seed, name):
         "accuracy": exp.accuracy,
         "dla_error": results.dla_verification_error,
         "completeness_mean": sum(completeness_vals) / len(completeness_vals) if completeness_vals else 0.0,
-        "cosine_separation": sf.get("cosine_separation"),  # None when centroids uninitialized
+        "cosine_separation": sf.get("cosine_separation", 0.0),
         "jaccard_separation": sf.get("class_separation", 0.0),
     }
 
@@ -79,9 +79,8 @@ def main() -> None:
     print(header)
     print("-" * 80)
     for name, m in [("Baseline", baseline), ("Full CIS", full_cis)]:
-        cos_str = f"{m['cosine_separation']:>10.4f}" if m['cosine_separation'] is not None else f"{'N/A':>10}"
         print(f"{name:<30} {m['accuracy']:>10.4f} {m['dla_error']:>10.6f} "
-              f"{m['completeness_mean']:>10.4f} {cos_str} {m['jaccard_separation']:>10.4f}")
+              f"{m['completeness_mean']:>10.4f} {m['cosine_separation']:>10.4f} {m['jaccard_separation']:>10.4f}")
     print(f"{'='*80}")
 
     # Save

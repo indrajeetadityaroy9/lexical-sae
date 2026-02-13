@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from sklearn.metrics import accuracy_score
+
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE
 
 
@@ -115,8 +117,7 @@ def train_dense_baseline(
             print(f"  Dense baseline: early stop at epoch {epoch + 1}")
             break
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    model.load_state_dict(best_state)
     model.eval()
 
     return model, tokenizer, best_val_acc
@@ -153,5 +154,4 @@ def score_dense_baseline(
             preds = outputs.logits.argmax(dim=-1)
             all_preds.extend(preds.cpu().tolist())
 
-    correct = sum(1 for p, l in zip(all_preds, labels) if p == l)
-    return correct / len(labels) if labels else 0.0
+    return accuracy_score(labels, all_preds) if labels else 0.0

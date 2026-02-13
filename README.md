@@ -155,11 +155,9 @@ splade/
 │   ├── eraser.py                      # ERASER faithfulness metrics
 │   ├── leace.py                       # LEACE concept erasure baseline
 │   ├── compare_explainers.py          # Comparison with LIME, IG, Attention
-│   ├── faithfulness.py                # Explainer removal stress test
 │   ├── baselines.py                   # Baseline accuracy scoring
 │   ├── dense_baseline.py              # Dense SAE comparison
-│   ├── polysemy.py                    # VPE polysemy analysis
-│   └── word_order.py                  # Word order sensitivity analysis
+│   └── polysemy.py                    # VPE polysemy analysis
 ├── data/
 │   └── loader.py                      # Dataset loading and preparation
 ├── config/

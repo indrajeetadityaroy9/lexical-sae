@@ -10,6 +10,8 @@ _DATASETS = {
     "civilcomments": {"path": "google/civil_comments", "name": None, "text_col": "text", "label_col": "toxicity", "label_threshold": 0.5, "test_split": "test", "num_labels": 2},
     "banking77": {"path": "PolyAI/banking77", "name": None, "text_col": "text", "test_split": "test", "num_labels": 77},
     "beavertails": {"path": "PKU-Alignment/BeaverTails", "name": "30k", "text_cols": ["prompt", "response"], "label_col": "is_safe", "label_invert": True, "test_split": "test", "num_labels": 2},
+    "sst2": {"path": "stanfordnlp/sst2", "name": None, "text_col": "sentence", "test_split": "validation", "num_labels": 2},
+    "agnews": {"path": "ag_news", "name": None, "text_col": "text", "test_split": "test", "num_labels": 4},
 }
 
 # Identity columns in CivilComments for bias analysis
@@ -52,18 +54,15 @@ def _shuffle_and_truncate(
     return list(shuffled_texts)[:max_samples], list(shuffled_labels)[:max_samples]
 
 
-def infer_max_length(texts: list[str], tokenizer, model_name: str | None = None) -> int:
+def infer_max_length(texts: list[str], tokenizer, model_name: str) -> int:
     sample = texts[:500]
     lengths = [len(tokenizer.encode(t, add_special_tokens=True)) for t in sample]
     p99 = int(numpy.percentile(lengths, 99))
     aligned = ((p99 + 7) // 8) * 8
 
-    if model_name is not None:
-        from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(model_name)
-        max_pos = getattr(config, "max_position_embeddings", 512)
-    else:
-        max_pos = 512
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(model_name)
+    max_pos = config.max_position_embeddings
 
     return max(64, min(max_pos, aligned))
 

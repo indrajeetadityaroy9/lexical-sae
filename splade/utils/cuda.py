@@ -7,8 +7,6 @@ os.environ.setdefault("TORCHINDUCTOR_COORDINATE_DESCENT_TUNING", "1")
 import numpy
 import torch
 
-assert torch.cuda.is_available(), "CUDA is required. No GPU detected."
-
 DEVICE = torch.device("cuda")
 COMPUTE_DTYPE = torch.bfloat16
 

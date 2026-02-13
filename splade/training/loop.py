@@ -11,6 +11,7 @@ from splade.circuits.geco import GECOController
 from splade.circuits.losses import (
     AttributionCentroidTracker,
     FeatureFrequencyTracker,
+    LossNormalizer,
     compute_completeness_loss,
     compute_frequency_penalty,
     compute_gate_sparsity_loss,
@@ -105,6 +106,10 @@ def train_model(
         num_features=vocab_size, target_sparsity=sparsity_target,
     )
     geco = GECOController(steps_per_epoch=steps_per_epoch)
+    norm_cc = LossNormalizer()
+    norm_sep = LossNormalizer()
+    norm_gate = LossNormalizer()
+    norm_freq = LossNormalizer()
     circuit_delay_steps = int(warmup_fraction * total_steps)
     patience_reset_step = int(warmup_fraction * total_steps)
     patience_was_reset = False
@@ -188,7 +193,7 @@ def train_model(
                         freq_tracker, _orig.activation,
                     )
 
-                    circuit_objective = cc_loss + sep_loss + gate_loss + freq_loss
+                    circuit_objective = norm_cc(cc_loss) + norm_sep(sep_loss) + norm_gate(gate_loss) + norm_freq(freq_loss)
                     loss = geco.compute_loss(classification_loss, circuit_objective)
 
                     centroid_tracker.update(
@@ -215,7 +220,7 @@ def train_model(
                 epoch_msg += f", under-active={under_active_frac:.1%}"
             if abs(geco._log_lambda) >= 4.9:
                 print(
-                    f"\n  [WARNING] GECO lambda pinned at {geco.lambda_ce:.2f} "
+                    f"\n  GECO lambda pinned at {geco.lambda_ce:.2f} "
                     f"(log_lambda={geco._log_lambda:.2f}, "
                     f"constraint_ema={geco._ema_constraint:.4f}). "
                     f"Model is {'sacrificing interpretability for accuracy' if geco._log_lambda > 0 else 'over-constraining accuracy'}."
@@ -262,9 +267,7 @@ def train_model(
         print(epoch_msg)
 
     # Restore best averaged weights
-    if best_state is not None:
-        # Switch to eval mode to get averaged params, then overwrite with best
-        optimizer.eval()
+    optimizer.eval()
         _orig_model = unwrap_compiled(model)
         for name, param in _orig_model.named_parameters():
             if name in best_state:

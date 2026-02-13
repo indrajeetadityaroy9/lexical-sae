@@ -132,21 +132,20 @@ def main() -> None:
 
     # Get top tokens for target class (class_idx=1: toxic/unsafe)
     print("\n--- Top attributed tokens for target class ---")
-    if exp.centroid_tracker is not None:
-        top_tokens = get_top_tokens(
-            exp.model, exp.tokenizer, class_idx=1,
-            centroid_tracker=exp.centroid_tracker, top_k=50,
-        )
-        print(f"{'Token':<20} {'Score':>10}")
-        print("-" * 30)
-        for token, score in top_tokens[:20]:
-            clean_token = token.lower().lstrip("\u0120").strip("##")
-            marker = " *" if clean_token in token_candidates else ""
-            print(f"{token:<20} {score:>10.4f}{marker}")
-        print("(* = candidate for suppression)")
+    top_tokens = get_top_tokens(
+        exp.model, exp.tokenizer, class_idx=1,
+        centroid_tracker=exp.centroid_tracker, top_k=50,
+    )
+    print(f"{'Token':<20} {'Score':>10}")
+    print("-" * 30)
+    for token, score in top_tokens[:20]:
+        clean_token = token.lower().lstrip("\u0120").strip("##")
+        marker = " *" if clean_token in token_candidates else ""
+        print(f"{token:<20} {score:>10.4f}{marker}")
+    print("(* = candidate for suppression)")
 
     # Identify which candidate tokens appear in top attributions
-    top_token_names = {t for t, _ in top_tokens} if exp.centroid_tracker else set()
+    top_token_names = {t for t, _ in top_tokens}
     tokens_to_suppress = [t for t in token_candidates if t in top_token_names]
     print(f"\nCandidate tokens found in top-50 attributions: {tokens_to_suppress}")
 

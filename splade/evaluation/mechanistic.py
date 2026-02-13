@@ -2,15 +2,23 @@ from dataclasses import dataclass, field
 
 import torch
 
-from splade.evaluation.compare_explainers import run_explainer_comparison
-from splade.evaluation.eraser import run_eraser_evaluation
-from splade.mechanistic.attribution import compute_attribution_tensor
-from splade.mechanistic.layerwise import run_layerwise_evaluation
+from splade.circuits.losses import AttributionCentroidTracker
 from splade.circuits.metrics import (VocabularyCircuit,
                                      extract_vocabulary_circuit,
                                      measure_circuit_completeness,
                                      measure_separation_cosine,
                                      measure_separation_jaccard)
+from splade.evaluation.autointerp import run_autointerp
+from splade.evaluation.compare_explainers import run_explainer_comparison
+from splade.evaluation.downstream_loss import compute_downstream_loss
+from splade.evaluation.eraser import run_eraser_evaluation
+from splade.evaluation.feature_absorption import detect_feature_absorption
+from splade.evaluation.mib_metrics import compute_cmd, compute_cpr
+from splade.evaluation.polysemy import compute_contextual_consistency_score
+from splade.evaluation.sparse_probing import run_sparse_probing
+from splade.evaluation.sparsity_frontier import compute_naopc, sweep_sparsity_frontier
+from splade.mechanistic.attribution import compute_attribution_tensor
+from splade.mechanistic.layerwise import run_layerwise_evaluation
 from splade.utils.cuda import COMPUTE_DTYPE, DEVICE, unwrap_compiled
 
 
@@ -27,6 +35,15 @@ class MechanisticResults:
     layerwise_attribution: dict = field(default_factory=dict)
     sae_comparison: dict = field(default_factory=dict)
     polysemy_scores: dict = field(default_factory=dict)
+    downstream_loss: dict = field(default_factory=dict)
+    sparsity_frontier: list = field(default_factory=list)
+    naopc: dict = field(default_factory=dict)
+    feature_absorption: dict = field(default_factory=dict)
+    sparse_probing: dict = field(default_factory=dict)
+    autointerp: dict = field(default_factory=dict)
+    transcoder_comparison: dict = field(default_factory=dict)
+    disentanglement: dict = field(default_factory=dict)
+    mib_metrics: dict = field(default_factory=dict)
 
 
 def _run_sae_comparison(
@@ -106,9 +123,13 @@ def run_mechanistic_evaluation(
     num_classes: int,
     circuit_fraction: float = 0.1,
     run_sae_comparison: bool = True,
-    centroid_tracker=None,
-    texts: list[str] | None = None,
+    centroid_tracker: AttributionCentroidTracker = None,
+    texts: list[str] = None,
     max_length: int = 128,
+    run_sparsity_frontier: bool = False,
+    run_transcoder_comparison: bool = False,
+    run_disentanglement: bool = False,
+    spurious_token_ids: list[int] = [],
 ) -> MechanisticResults:
     """Run the full mechanistic interpretability evaluation suite."""
     _model = unwrap_compiled(model)
@@ -155,9 +176,8 @@ def run_mechanistic_evaluation(
 
         class_ids, class_masks = zip(*class_inputs)
         precomputed = None
-        if centroid_tracker is not None and class_idx < centroid_tracker.num_classes:
-            if centroid_tracker._initialized[class_idx]:
-                precomputed = centroid_tracker.centroids[class_idx]
+        if class_idx < centroid_tracker.num_classes and centroid_tracker._initialized[class_idx]:
+            precomputed = centroid_tracker.centroids[class_idx]
 
         circuit = extract_vocabulary_circuit(
             model, list(class_ids), list(class_masks),
@@ -177,21 +197,12 @@ def run_mechanistic_evaluation(
         results.circuit_completeness[class_idx] = completeness
 
     # 4. Separation metrics (cosine primary, Jaccard supplementary)
-    precomputed_dict = None
-    if centroid_tracker is not None:
-        precomputed_dict = {
-            c: centroid_tracker.centroids[c]
-            for c in range(num_classes)
-            if centroid_tracker._initialized[c]
-        }
-
-    # Only report cosine separation when centroids were actually trained
-    # (uninitialized zero centroids trivially give 1.0, which is meaningless)
-    has_centroids = (
-        centroid_tracker is not None
-        and centroid_tracker._initialized.any()
-    )
-    cosine_sep = measure_separation_cosine(centroid_tracker) if has_centroids else None
+    precomputed_dict = {
+        c: centroid_tracker.centroids[c]
+        for c in range(num_classes)
+        if centroid_tracker._initialized[c]
+    }
+    cosine_sep = measure_separation_cosine(centroid_tracker)
     jaccard_result = measure_separation_jaccard(
         model, input_ids_list, attention_mask_list, labels, tokenizer,
         precomputed_attributions=precomputed_dict,
@@ -217,17 +228,69 @@ def run_mechanistic_evaluation(
     )
 
     # 8. Polysemy defense: Contextual Consistency Score
-    if texts is not None:
-        from splade.evaluation.polysemy import compute_contextual_consistency_score
-        results.polysemy_scores = compute_contextual_consistency_score(
-            model, tokenizer, texts, labels, max_length,
-        )
+    results.polysemy_scores = compute_contextual_consistency_score(
+        model, tokenizer, texts, labels, max_length,
+    )
 
     # 9. SAE baseline comparison (optional)
     if run_sae_comparison:
         results.sae_comparison = _run_sae_comparison(
             model, input_ids_list, attention_mask_list, labels, tokenizer,
         )
+
+    # 10. Downstream loss: CE/KL from sparse bottleneck
+    results.downstream_loss = compute_downstream_loss(
+        model, input_ids_list, attention_mask_list, labels,
+    )
+
+    # 11. NAOPC normalization
+    results.naopc = compute_naopc(model, input_ids_list, attention_mask_list, labels)
+
+    # 12. Sparsity-fidelity frontier (expensive, opt-in)
+    if run_sparsity_frontier:
+        results.sparsity_frontier = sweep_sparsity_frontier(
+            model, input_ids_list, attention_mask_list, labels,
+        )
+
+    # 13. Feature absorption detection
+    results.feature_absorption = detect_feature_absorption(
+        model, input_ids_list, attention_mask_list, labels, tokenizer,
+    )
+
+    # 14. Sparse probing
+    results.sparse_probing = run_sparse_probing(
+        model, input_ids_list, attention_mask_list, labels, num_classes,
+    )
+
+    # 15. AutoInterp (offline)
+    results.autointerp = run_autointerp(
+        model, tokenizer, texts, labels, input_ids_list, attention_mask_list,
+    )
+
+    # 16. Transcoder baseline (expensive, opt-in)
+    if run_transcoder_comparison:
+        from splade.evaluation.transcoder_baseline import run_transcoder_comparison as _run_tc
+        results.transcoder_comparison = _run_tc(
+            model, input_ids_list, attention_mask_list, labels,
+        )
+
+    # 17. Disentanglement metrics (opt-in)
+    if run_disentanglement:
+        from splade.evaluation.disentanglement import compute_scr, compute_tpp
+        results.disentanglement = {
+            "scr": compute_scr(
+                model, input_ids_list, attention_mask_list, labels, spurious_token_ids,
+            ),
+            "tpp": compute_tpp(
+                model, input_ids_list, attention_mask_list, labels, num_classes,
+            ),
+        }
+
+    # 18. MIB circuit metrics (CPR + CMD)
+    results.mib_metrics = {
+        "cpr": compute_cpr(model, input_ids_list, attention_mask_list, labels, circuit_fraction),
+        "cmd": compute_cmd(model, input_ids_list, attention_mask_list, labels),
+    }
 
     return results
 
@@ -247,6 +310,9 @@ def print_mechanistic_results(results: MechanisticResults) -> None:
     print("\n[Tier 1: Performance]")
     print(f"  Accuracy:              {results.accuracy:.4f}")
     print(f"  DLA Verification Error: {results.dla_verification_error:.6f}")
+    dl = results.downstream_loss
+    print(f"  Delta-CE (bottleneck):  {dl['delta_ce']:.4f}")
+    print(f"  KL divergence:         {dl['kl_divergence']:.4f}")
 
     tier1_pass = results.dla_verification_error < 0.01
     if not tier1_pass:
@@ -266,27 +332,47 @@ def print_mechanistic_results(results: MechanisticResults) -> None:
     # --- Tier 3: Interpretability ---
     print("\n[Tier 3: Interpretability]")
 
-    if results.semantic_fidelity:
-        sf = results.semantic_fidelity
-        cos_sep = sf.get('cosine_separation')
-        cos_str = f"{cos_sep:.4f}" if cos_sep is not None else "N/A (no trained centroids)"
-        print(f"  Cosine separation:     {cos_str}")
+    sf = results.semantic_fidelity
+    print(f"  Cosine separation:     {sf['cosine_separation']:.4f}")
 
-    if results.circuits:
-        print("\n  Example circuits:")
-        for class_idx, circuit in sorted(results.circuits.items()):
-            tokens = circuit.token_names[:5]
-            scores = circuit.attribution_scores[:5]
-            token_strs = [f"{t}({s:.3f})" for t, s in zip(tokens, scores)]
-            print(f"    Class {class_idx}: {', '.join(token_strs)}")
+    print("\n  Example circuits:")
+    for class_idx, circuit in sorted(results.circuits.items()):
+        tokens = circuit.token_names[:5]
+        scores = circuit.attribution_scores[:5]
+        token_strs = [f"{t}({s:.3f})" for t, s in zip(tokens, scores)]
+        print(f"    Class {class_idx}: {', '.join(token_strs)}")
 
-    if results.polysemy_scores:
-        ps = results.polysemy_scores
-        print(f"\n[Polysemy Defense: Contextual Consistency Score]")
-        print(f"  Mean cross-context Jaccard: {ps['mean_jaccard']:.4f}")
-        print(f"  Words evaluated: {ps['num_words_evaluated']}")
-        if ps.get("per_word"):
-            for word, info in sorted(ps["per_word"].items(), key=lambda x: x[1]["jaccard"]):
-                print(f"    {word:<12} Jaccard={info['jaccard']:.4f}  pairs={info['n_pairs']}  n={info['n_occurrences']}")
+    ps = results.polysemy_scores
+    print(f"\n[Polysemy Defense: Contextual Consistency Score]")
+    print(f"  Mean cross-context Jaccard: {ps['mean_jaccard']:.4f}")
+    print(f"  Words evaluated: {ps['num_words_evaluated']}")
+    for word, info in sorted(ps.get("per_word", {}).items(), key=lambda x: x[1]["jaccard"]):
+        print(f"    {word:<12} Jaccard={info['jaccard']:.4f}  pairs={info['n_pairs']}  n={info['n_occurrences']}")
+
+    # --- Tier 4: SAEBench Metrics ---
+    print("\n[Tier 4: SAEBench Metrics]")
+
+    print(f"  NAOPC Comp:            {results.naopc['naopc_comprehensiveness']:.4f}")
+    print(f"  NAOPC Suff:            {results.naopc['naopc_sufficiency']:.4f}")
+
+    fa = results.feature_absorption
+    print(f"  Feature absorption:    {fa['absorption_score']:.4f} ({fa['num_pairs_tested']} pairs tested)")
+
+    sp = results.sparse_probing
+    print(f"  Sparse probe accuracy: {sp['probe_accuracy']:.4f} (F1={sp['probe_f1_macro']:.4f}, {sp['n_features_used']} features)")
+
+    print(f"  AutoInterp score:      {results.autointerp['mean_score']:.4f}")
+
+    mib = results.mib_metrics
+    print(f"  CPR:                   {mib['cpr']['cpr']:.4f}")
+    print(f"  CMD:                   {mib['cmd']['cmd']:.4f} (min_frac={mib['cmd']['min_fraction']:.2f})")
+
+    if results.transcoder_comparison:
+        tc = results.transcoder_comparison
+        print(f"  Transcoder MSE:        {tc['reconstruction_mse']:.4f} (active={tc['mean_active_features']:.0f}, dead={tc['dead_feature_fraction']:.1%})")
+
+    if results.disentanglement:
+        print(f"  SCR score:             {results.disentanglement['scr']['scr_score']:.4f}")
+        print(f"  TPP score:             {results.disentanglement['tpp']['tpp_score']:.4f}")
 
     print("\n" + "=" * 80)

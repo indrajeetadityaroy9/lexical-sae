@@ -74,6 +74,12 @@ def run_experiment(config: Config) -> dict:
         "layerwise_attribution": mechanistic_results.layerwise_attribution,
         "sae_comparison": mechanistic_results.sae_comparison,
         "polysemy_scores": mechanistic_results.polysemy_scores,
+        "downstream_loss": mechanistic_results.downstream_loss,
+        "naopc": mechanistic_results.naopc,
+        "feature_absorption": mechanistic_results.feature_absorption,
+        "sparse_probing": mechanistic_results.sparse_probing,
+        "autointerp": mechanistic_results.autointerp,
+        "mib_metrics": mechanistic_results.mib_metrics,
         "circuit_completeness": {
             str(k): v for k, v in mechanistic_results.circuit_completeness.items()
         },

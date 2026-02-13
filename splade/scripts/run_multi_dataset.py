@@ -1,4 +1,4 @@
-"""Multi-dataset CIS benchmark: Banking77, IMDB, BeaverTails.
+"""Multi-dataset CIS benchmark.
 
 Runs the full CIS pipeline on each dataset and produces a combined
 results table for paper evaluation.
@@ -17,6 +17,8 @@ PAPER_DATASETS = {
     "banking77": {"train_samples": -1, "test_samples": -1},
     "imdb": {"train_samples": -1, "test_samples": -1},
     "beavertails": {"train_samples": -1, "test_samples": -1},
+    "sst2": {"train_samples": -1, "test_samples": -1},
+    "agnews": {"train_samples": -1, "test_samples": -1},
 }
 
 
@@ -47,29 +49,32 @@ def run_multi_dataset(config) -> dict[str, dict]:
 
 
 def _print_combined_table(all_results: dict[str, dict]) -> None:
-    print(f"\n{'=' * 100}")
+    print(f"\n{'=' * 115}")
     print("MULTI-DATASET RESULTS")
-    print(f"{'=' * 100}")
+    print(f"{'=' * 115}")
     header = (
         f"{'Dataset':<12} {'Acc':>8} {'DLA Err':>10} "
         f"{'AOPC-C':>8} {'AOPC-S':>8} "
-        f"{'Jac Sep':>10}"
+        f"{'Jac Sep':>10} {'Delta-CE':>10} {'KL Div':>8}"
     )
     print(header)
-    print("-" * 100)
+    print("-" * 115)
 
     for dataset_name, r in all_results.items():
         eraser = r.get("eraser_metrics", {})
         sf = r.get("semantic_fidelity", {})
+        dl = r.get("downstream_loss", {})
         print(
             f"{dataset_name:<12} "
             f"{r['accuracy']:>8.4f} "
             f"{r['dla_verification_error']:>10.6f} "
             f"{eraser.get('aopc_comprehensiveness', 0):>8.4f} "
             f"{eraser.get('aopc_sufficiency', 0):>8.4f} "
-            f"{sf.get('class_separation', 0):>10.4f}"
+            f"{sf.get('class_separation', 0):>10.4f} "
+            f"{dl.get('delta_ce', 0):>10.4f} "
+            f"{dl.get('kl_divergence', 0):>8.4f}"
         )
-    print(f"{'=' * 100}")
+    print(f"{'=' * 115}")
 
 
 def _save_combined(output_dir: str, all_results: dict[str, list[dict]]) -> None:

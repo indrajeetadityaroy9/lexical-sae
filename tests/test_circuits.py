@@ -355,6 +355,55 @@ class TestComputeFrequencyPenalty:
         assert activation.log_threshold.grad[5:].abs().sum() > 0.0
 
 
+class TestLossNormalizer:
+    def test_first_call_returns_one(self):
+        from splade.circuits.losses import LossNormalizer
+        norm = LossNormalizer()
+        loss = torch.tensor(5.0, requires_grad=True)
+        result = norm(loss)
+        # First call: EMA = 5.0, so result = 5.0 / 5.0 = 1.0
+        assert abs(result.item() - 1.0) < 1e-6
+
+    def test_normalizes_to_unit_scale(self):
+        from splade.circuits.losses import LossNormalizer
+        norm = LossNormalizer()
+        # Feed constant value; after convergence, output should be ~1.0
+        for _ in range(200):
+            result = norm(torch.tensor(42.0))
+        assert abs(result.item() - 1.0) < 1e-4
+
+    def test_gradient_flows_through(self):
+        from splade.circuits.losses import LossNormalizer
+        norm = LossNormalizer()
+        x = torch.tensor(3.0, requires_grad=True)
+        result = norm(x)
+        result.backward()
+        assert x.grad is not None
+        assert x.grad.item() != 0.0
+
+    def test_different_scales_produce_similar_output(self):
+        from splade.circuits.losses import LossNormalizer
+        norm_small = LossNormalizer()
+        norm_large = LossNormalizer()
+        # After convergence, both should output ~1.0 despite 1000x scale difference
+        for _ in range(200):
+            r_small = norm_small(torch.tensor(0.01))
+            r_large = norm_large(torch.tensor(10.0))
+        assert abs(r_small.item() - 1.0) < 1e-3
+        assert abs(r_large.item() - 1.0) < 1e-3
+
+    def test_adapts_to_changing_scale(self):
+        from splade.circuits.losses import LossNormalizer
+        norm = LossNormalizer()
+        # Converge on scale=1.0
+        for _ in range(200):
+            norm(torch.tensor(1.0))
+        # Switch to scale=100.0; after 500 steps (~5 time constants) should adapt
+        for _ in range(500):
+            result = norm(torch.tensor(100.0))
+        assert abs(result.item() - 1.0) < 0.05
+
+
 class TestContrastiveSeparationLoss:
     def test_zero_loss_when_well_separated(self):
         from splade.circuits.losses import AttributionCentroidTracker, compute_separation_loss

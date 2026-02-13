@@ -32,14 +32,9 @@ def _infer_batch_size(model_name: str, max_length: int) -> int:
     base_power = min(6, max(3, int(math.log2(max(1, 32 * mem_ratio)))))
     base_bs = 2 ** base_power
     # Scale by available GPU memory relative to 22GB usable reference
-    scale_factor = 1.0
-    if torch.cuda.is_available():
-        try:
-            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            usable_mem = max(1.0, total_mem - 2.0)
-            scale_factor = usable_mem / 22.0
-        except Exception:
-            scale_factor = 1.0
+    total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    usable_mem = max(1.0, total_mem - 2.0)
+    scale_factor = usable_mem / 22.0
     scaled_bs = int(base_bs * scale_factor)
     # Round down to power of 2, cap at 512
     power = min(9, int(math.log2(max(1, scaled_bs))))
@@ -66,50 +61,6 @@ def _build_param_groups(model: torch.nn.Module, base_lr: float) -> list[dict]:
     return [
         {"params": decay_params, "lr": base_lr, "weight_decay": weight_decay},
         {"params": no_decay_params, "lr": base_lr, "weight_decay": 0.0},
-    ]
-
-
-def _build_param_groups_with_gate_boost(
-    model: torch.nn.Module,
-    base_lr: float,
-    gate_lr_multiplier: float = 5.0,
-) -> list[dict]:
-    """Build param groups with boosted LR for sparsity gates.
-
-    Creates three groups:
-      1. Weight-decayed params (matrices, excluding gates)
-      2. Non-decayed params (biases, norms, excluding gates)
-      3. Gate params (activation.log_threshold) with boosted LR, no decay
-    """
-    weight_decay = 0.1 * base_lr
-    _orig = unwrap_compiled(model)
-    decay_params: list[torch.nn.Parameter] = []
-    no_decay_params: list[torch.nn.Parameter] = []
-    gate_params: list[torch.nn.Parameter] = []
-
-    gate_identifiers = ["log_threshold"]
-    boosted_names: list[str] = []
-
-    for name, param in _orig.named_parameters():
-        if not param.requires_grad:
-            continue
-        if any(ident in name for ident in gate_identifiers):
-            gate_params.append(param)
-            boosted_names.append(name)
-        elif param.ndim < 2 or "LayerNorm" in name or "layer_norm" in name or "norm" in name or "bias" in name:
-            no_decay_params.append(param)
-        else:
-            decay_params.append(param)
-
-    if not boosted_names:
-        raise ValueError(
-            f"No sparsity gates found matching {gate_identifiers}."
-        )
-
-    return [
-        {"params": decay_params, "lr": base_lr, "weight_decay": weight_decay, "_lr_multiplier": 1.0},
-        {"params": no_decay_params, "lr": base_lr, "weight_decay": 0.0, "_lr_multiplier": 1.0},
-        {"params": gate_params, "lr": base_lr * gate_lr_multiplier, "weight_decay": 0.0, "_lr_multiplier": gate_lr_multiplier},
     ]
 
 

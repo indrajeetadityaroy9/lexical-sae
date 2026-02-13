@@ -20,7 +20,7 @@ def _id_to_name(tid: int, tokenizer, model: torch.nn.Module) -> str:
     V = _orig.vocab_size
     if tid < V:
         return tokenizer.convert_ids_to_tokens([tid])[0]
-    if hasattr(_orig, 'virtual_expander') and _orig.virtual_expander is not None:
+    if _orig.virtual_expander is not None:
         vpe = _orig.virtual_expander
         offset = tid - V
         M = vpe.num_senses - 1

@@ -62,27 +62,20 @@ def get_top_tokens(
     model: nn.Module,
     tokenizer,
     class_idx: int,
-    centroid_tracker=None,
+    centroid_tracker,
     top_k: int = 20,
     clean_vocab: bool = True,
 ) -> list[tuple[str, float]]:
     """Return top-k attributed vocabulary tokens for a class.
 
-    Uses training centroids if available, otherwise requires a dataset pass.
+    Uses training centroids from centroid_tracker.
     Returns list of (token_name, attribution_score) sorted by score descending.
 
     If clean_vocab=True, filters out subwords, special tokens, and single
     characters so results show only human-readable whole-word concepts.
     """
     _model = unwrap_compiled(model)
-
-    if centroid_tracker is not None and centroid_tracker._initialized[class_idx]:
-        attr = centroid_tracker.centroids[class_idx].clone()
-    else:
-        raise ValueError(
-            "centroid_tracker required with initialized centroids for class "
-            f"{class_idx}. Train the model first."
-        )
+    attr = centroid_tracker.centroids[class_idx].clone()
 
     if clean_vocab:
         vocab_mask = get_clean_vocab_mask(tokenizer).to(attr.device)
@@ -114,7 +107,7 @@ class SuppressedModel(nn.Module):
         for tid in suppressed_token_ids:
             mask[tid] = 0.0
         # Also suppress virtual sense slots for polysemous tokens
-        if hasattr(_orig, 'virtual_expander') and _orig.virtual_expander is not None:
+        if _orig.virtual_expander is not None:
             V = _orig.vocab_size
             vpe = _orig.virtual_expander
             for tid in suppressed_token_ids:

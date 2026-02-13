@@ -90,6 +90,30 @@ class AttributionCentroidTracker(nn.Module):
         return self.centroids / norms
 
 
+class LossNormalizer:
+    """Normalizes a loss by its running mean so all losses contribute at unit scale.
+
+    Uses EMA tracking with the same decay as FeatureFrequencyTracker (0.99,
+    ~100-step effective window). This replaces manual scaling constants
+    (like the former /32 in frequency penalty) with an adaptive mechanism
+    that automatically adjusts to any dataset, sparsity target, or
+    threshold initialization.
+    """
+
+    def __init__(self, decay: float = 0.99):
+        self._ema: torch.Tensor | None = None
+        self._decay = decay
+
+    def __call__(self, loss: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            val = loss.detach()
+            if self._ema is None:
+                self._ema = val
+            else:
+                self._ema = self._ema * self._decay + val * (1.0 - self._decay)
+        return loss / self._ema.clamp(min=1e-8)
+
+
 class FeatureFrequencyTracker:
     """Tracks per-feature activation frequency via EMA.
 
@@ -156,7 +180,7 @@ def compute_completeness_loss(
 def _centroid_cosine_loss(
     centroid_tracker: AttributionCentroidTracker,
 ) -> torch.Tensor:
-    """Fallback: mean pairwise cosine similarity between class centroids."""
+    """Mean pairwise cosine similarity between class centroids (early training)."""
     initialized_mask = centroid_tracker._initialized
     num_init = int(initialized_mask.sum().item())
     if num_init < 2:
@@ -241,4 +265,4 @@ def compute_frequency_penalty(
         return torch.tensor(0.0, device=DEVICE)
 
     log_thresholds = activation_module.log_threshold  # [V]
-    return log_thresholds[under_active].mean() / 32
+    return log_thresholds[under_active].mean()
