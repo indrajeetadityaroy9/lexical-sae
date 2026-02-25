@@ -9,11 +9,6 @@ class DataConfig:
     train_samples: int = -1  # -1 = use full split
     test_samples: int = -1   # -1 = use full split
 
-    def __post_init__(self):
-        if self.train_samples != -1 and self.train_samples <= 0:
-            raise ValueError(f"train_samples must be -1 (full) or > 0, got {self.train_samples}")
-        if self.test_samples != -1 and self.test_samples <= 0:
-            raise ValueError(f"test_samples must be -1 (full) or > 0, got {self.test_samples}")
 
 
 @dataclass
@@ -36,17 +31,6 @@ class TrainingConfig:
     num_workers: int | None = None      # None = auto (min(cpu_count, 16))
     prefetch_factor: int = 4
 
-    def __post_init__(self):
-        if self.learning_rate <= 0:
-            raise ValueError(f"learning_rate must be > 0, got {self.learning_rate}")
-        if not (0 < self.sparsity_target < 1):
-            raise ValueError(f"sparsity_target must be in (0, 1), got {self.sparsity_target}")
-        if self.warmup_fraction < 0:
-            raise ValueError(f"warmup_fraction must be >= 0, got {self.warmup_fraction}")
-        if self.pooling not in ("max", "attention"):
-            raise ValueError(f"pooling must be 'max' or 'attention', got '{self.pooling}'")
-        if self.max_epochs < 1:
-            raise ValueError(f"max_epochs must be >= 1, got {self.max_epochs}")
 
 
 @dataclass
@@ -55,9 +39,6 @@ class VPEConfig:
     token_ids: list[int] = field(default_factory=list)
     num_senses: int = 4
 
-    def __post_init__(self):
-        if self.num_senses < 1:
-            raise ValueError(f"num_senses must be >= 1, got {self.num_senses}")
 
 
 @dataclass

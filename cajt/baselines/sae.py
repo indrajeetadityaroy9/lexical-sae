@@ -51,7 +51,7 @@ def train_sae_on_splade(
     all_hidden = []
     for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
         with torch.inference_mode(), autocast():
-            transformed = model._get_mlm_head_input(input_ids, attention_mask)
+            transformed = model.get_mlm_head_input(input_ids, attention_mask)
         # Use CLS token representation, keep on GPU
         all_hidden.append(transformed[:, 0, :].float())
 
@@ -88,7 +88,7 @@ def compare_sae_with_dla(
         with torch.inference_mode(), autocast():
             sparse_seq, *_ = model(input_ids, attention_mask)
             sparse_vector = model.to_pooled(sparse_seq, attention_mask)
-            transformed = model._get_mlm_head_input(input_ids, attention_mask)
+            transformed = model.get_mlm_head_input(input_ids, attention_mask)
             cls_hidden = transformed[:, 0, :]
 
         dla_active = int((sparse_vector[0] > 0).sum().item())
@@ -104,7 +104,7 @@ def compare_sae_with_dla(
     all_hidden = []
     for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
         with torch.inference_mode(), autocast():
-            transformed = model._get_mlm_head_input(input_ids, attention_mask)
+            transformed = model.get_mlm_head_input(input_ids, attention_mask)
         all_hidden.append(transformed[:, 0, :].float())
 
     hidden_tensor = torch.cat(all_hidden, dim=0)

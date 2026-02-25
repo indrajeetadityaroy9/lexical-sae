@@ -8,7 +8,7 @@ longer inputs (padding with irrelevant text). ModernBERT supports up to 8192 tok
 import random
 
 from cajt.config import Config
-from cajt.inference import score_model
+from cajt.evaluation.collect import score_model
 from cajt.training.pipeline import setup_and_train
 
 

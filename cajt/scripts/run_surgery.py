@@ -61,9 +61,6 @@ def _load_data(config: Config, dataset_name: str, split: str):
     Args:
         split: "test" for evaluation data with metadata, "train" for LEACE fitting.
     """
-    if dataset_name not in _DATASET_CONFIG:
-        raise ValueError(f"Surgery not supported for dataset: {dataset_name}")
-
     loader_fn, token_candidates = _DATASET_CONFIG[dataset_name]
     seed = config.seed
 
@@ -77,8 +74,6 @@ def _load_data(config: Config, dataset_name: str, split: str):
             train_samples=config.data.train_samples, test_samples=0, seed=seed,
         )
         return texts, labels
-    else:
-        raise ValueError(f"Unknown split: {split}")
 
 
 def run(config: Config) -> dict:

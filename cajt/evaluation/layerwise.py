@@ -21,7 +21,7 @@ from cajt.runtime import autocast, DEVICE
 _LAYERWISE_SAMPLES = 100
 
 
-def _get_transformer_layers(model: torch.nn.Module) -> list[torch.nn.Module]:
+def get_transformer_layers(model: torch.nn.Module) -> list[torch.nn.Module]:
     """Get the list of transformer layers from the ModernBERT encoder."""
     return list(model.encoder.layers)
 
@@ -45,7 +45,7 @@ def decompose_sparse_vector_by_layer(
         [B, num_layers, V] per-layer contributions to sparse_vector.
     """
 
-    layers = _get_transformer_layers(model)
+    layers = get_transformer_layers(model)
     num_layers = len(layers)
 
     # Clean forward pass

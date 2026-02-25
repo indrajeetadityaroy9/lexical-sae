@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from cajt.evaluation.collect import predict
 from cajt.runtime import autocast, DEVICE
 
 
@@ -23,8 +24,6 @@ def evaluate_bias(
         per_identity: {name: {accuracy, fpr, count, fpr_gap}},
         nontoxic_identity_accuracy, nontoxic_noidentity_accuracy, collateral_gap
     """
-    from cajt.inference import predict
-
     preds = predict(model, tokenizer, texts, max_length, batch_size, num_labels=2)
 
     # Overall metrics

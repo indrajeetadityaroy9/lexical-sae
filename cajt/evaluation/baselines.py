@@ -23,6 +23,7 @@ from cajt.evaluation.eraser import (
 )
 from cajt.core.attribution import compute_attribution_tensor
 from cajt.core.constants import EVAL_BATCH_SIZE
+from cajt.evaluation.layerwise import get_transformer_layers
 
 
 def dla_attribution(
@@ -126,8 +127,7 @@ def _get_last_layer_cls_attention(
     encoder = model.encoder
 
     # Get last transformer layer
-    from cajt.evaluation.layerwise import _get_transformer_layers
-    layers = _get_transformer_layers(model)
+    layers = get_transformer_layers(model)
     last_layer = layers[-1]
 
     # Capture input to the last layer via pre-hook
@@ -194,7 +194,7 @@ def attention_attribution(
 
     # Get per-position sparse representations via backbone (second encoder pass)
     with torch.inference_mode(), autocast():
-        sparse_sequence, *_ = model._compute_sparse_sequence(
+        sparse_sequence, *_ = model.compute_sparse_sequence(
             input_ids, attention_mask,
         )  # [B, L, V]
 

@@ -7,6 +7,7 @@ Two-phase pipeline:
 Optional dense baseline comparison via config.evaluation.train_dense_baseline.
 """
 
+from cajt.baselines.dense import score_dense_baseline, train_dense_baseline
 from cajt.config import Config
 from cajt.evaluation.orchestrator import run_mechanistic_evaluation
 from cajt.evaluation.results import print_comparison_table, print_mechanistic_results
@@ -32,10 +33,6 @@ def run(config: Config) -> dict:
     # Optional: Dense baseline comparison
     dense_test_acc = None
     if config.evaluation.train_dense_baseline:
-        from cajt.baselines.dense import (
-            score_dense_baseline,
-            train_dense_baseline,
-        )
         print("\n--- Training Dense Baseline ---")
         dense_model, dense_tokenizer, dense_val_acc = train_dense_baseline(
             model_name=config.model.name,

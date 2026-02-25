@@ -47,7 +47,7 @@ def compute_downstream_loss(
 
         with torch.inference_mode(), autocast():
             # Dense path: bypass JumpReLU, use ReLU for non-negativity only
-            mlm_logits = model._backbone_forward(
+            mlm_logits = model.backbone_forward(
                 batch_ids, batch_mask,
             ).logits
 

@@ -249,11 +249,11 @@ class LexicalSAE(torch.nn.Module):
         """Persistent hook capturing hidden states before output projection."""
         self._captured_hidden = args[0]
 
-    def _backbone_forward(self, input_ids, attention_mask):
+    def backbone_forward(self, input_ids, attention_mask):
         """Run backbone forward pass."""
         return self.backbone(input_ids=input_ids, attention_mask=attention_mask)
 
-    def _compute_sparse_sequence(
+    def compute_sparse_sequence(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
@@ -265,7 +265,7 @@ class LexicalSAE(torch.nn.Module):
             gate_mask: [B, L, V_expanded] binary gate mask {0,1}.
             l0_probs: [B, L, V_expanded] differentiable P(z > θ) for L0 loss.
         """
-        mlm_logits = self._backbone_forward(
+        mlm_logits = self.backbone_forward(
             input_ids, attention_mask,
         ).logits  # [B, L, V]
 
@@ -345,7 +345,7 @@ class LexicalSAE(torch.nn.Module):
         )
         return masked.max(dim=1).values
 
-    def _get_mlm_head_input(
+    def get_mlm_head_input(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
@@ -366,7 +366,7 @@ class LexicalSAE(torch.nn.Module):
 
         handle = self.backbone.get_output_embeddings().register_forward_pre_hook(_hook)
         try:
-            self._backbone_forward(input_ids, attention_mask)
+            self.backbone_forward(input_ids, attention_mask)
         finally:
             handle.remove()
         return captured["hidden"]
@@ -383,4 +383,4 @@ class LexicalSAE(torch.nn.Module):
             gate_mask: [B, L, V_expanded] binary gate mask {0,1}.
             l0_probs: [B, L, V_expanded] differentiable P(z > θ) for L0 loss.
         """
-        return self._compute_sparse_sequence(input_ids, attention_mask)
+        return self.compute_sparse_sequence(input_ids, attention_mask)

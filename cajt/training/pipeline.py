@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from cajt.config import Config
 from cajt.training.losses import AttributionCentroidTracker
 from cajt.data import infer_max_length, load_dataset_by_name
-from cajt.inference import score_model
+from cajt.evaluation.collect import score_model
 from cajt.core.model import LexicalSAE
 from cajt.training.loop import train_model
 from cajt.training.optim import _infer_batch_size

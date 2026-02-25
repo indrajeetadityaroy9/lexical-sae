@@ -20,7 +20,7 @@ from cajt.core.attribution import compute_attribution_tensor
 from cajt.core.constants import CIRCUIT_TEMPERATURE
 from cajt.runtime import DEVICE
 
-__UNDER_ACTIVE_FRACTION = 0.1
+_UNDER_ACTIVE_FRACTION = 0.1
 
 class AttributionCentroidTracker(nn.Module):
     """Maintains EMA of per-class mean absolute attribution vectors.

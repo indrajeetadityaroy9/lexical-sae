@@ -2,6 +2,7 @@ import random
 
 import numpy
 from datasets import load_dataset
+from transformers import AutoConfig
 
 
 _DATASETS = {
@@ -60,7 +61,6 @@ def infer_max_length(texts: list[str], tokenizer, model_name: str) -> int:
     p99 = int(numpy.percentile(lengths, 99))
     aligned = ((p99 + 7) // 8) * 8
 
-    from transformers import AutoConfig
     config = AutoConfig.from_pretrained(model_name)
     max_pos = config.max_position_embeddings
 

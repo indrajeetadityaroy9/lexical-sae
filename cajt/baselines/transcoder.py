@@ -58,8 +58,8 @@ def run_transcoder_comparison(
     all_logits = []
     for input_ids, attention_mask in zip(input_ids_list, attention_mask_list):
         with torch.inference_mode(), autocast():
-            hidden = model._get_mlm_head_input(input_ids, attention_mask)
-            mlm_out = model._backbone_forward(input_ids, attention_mask).logits
+            hidden = model.get_mlm_head_input(input_ids, attention_mask)
+            mlm_out = model.backbone_forward(input_ids, attention_mask).logits
         all_hidden.append(hidden[:, 0, :].float())
         all_logits.append(mlm_out[:, 0, :].float())
 

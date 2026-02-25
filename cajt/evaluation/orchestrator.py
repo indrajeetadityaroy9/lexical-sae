@@ -18,6 +18,9 @@ from cajt.evaluation.sparse_probing import run_sparse_probing
 from cajt.evaluation.sparsity_frontier import compute_naopc, sweep_sparsity_frontier
 from cajt.core.attribution import compute_attribution_tensor
 from cajt.evaluation.layerwise import run_layerwise_evaluation
+from cajt.baselines.sae import compare_sae_with_dla
+from cajt.baselines.transcoder import run_transcoder_comparison as _run_tc
+from cajt.evaluation.disentanglement import compute_scr, compute_tpp
 from cajt.runtime import autocast, DEVICE
 
 
@@ -140,7 +143,6 @@ def run_mechanistic_evaluation(
 
     # 9. SAE baseline comparison (optional)
     if run_sae_comparison:
-        from cajt.baselines.sae import compare_sae_with_dla
         results.sae_comparison = compare_sae_with_dla(
             model, input_ids_list, attention_mask_list, labels, tokenizer,
         )
@@ -176,14 +178,12 @@ def run_mechanistic_evaluation(
 
     # 16. Transcoder baseline (expensive, opt-in)
     if run_transcoder_comparison:
-        from cajt.baselines.transcoder import run_transcoder_comparison as _run_tc
         results.transcoder_comparison = _run_tc(
             model, input_ids_list, attention_mask_list, labels,
         )
 
     # 17. Disentanglement metrics (opt-in)
     if run_disentanglement:
-        from cajt.evaluation.disentanglement import compute_scr, compute_tpp
         results.disentanglement = {
             "scr": compute_scr(
                 model, input_ids_list, attention_mask_list, labels, spurious_token_ids,
