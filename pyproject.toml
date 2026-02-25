@@ -23,20 +23,13 @@ dependencies = [
 ]
 
 [project.scripts]
-lexical-sae = "lexical_sae.scripts.run:main"
+lexical-sae = "cajt.scripts.run:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.8"]
+dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 markers = ["slow: tests requiring network access (deselect with '-k not slow')"]
 
 [tool.setuptools.packages.find]
-include = ["lexical_sae*"]
-
-[tool.ruff]
-target-version = "py310"
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+include = ["cajt*"]

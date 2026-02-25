@@ -5,7 +5,7 @@ echo "============================================"
 echo "Lexical-SAE — Reproduction Pipeline"
 echo "============================================"
 
-RUNNER="python -m lexical_sae.scripts.run"
+RUNNER="python -m cajt.scripts.run"
 
 # Core experiments
 $RUNNER --config experiments/core/banking77.yaml
