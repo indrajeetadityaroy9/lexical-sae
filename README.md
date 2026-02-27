@@ -130,60 +130,6 @@ SPALF requires 4 hyperparameters. All other values are self-calibrated:
 
 Structural constants (whitening tolerance, drift budget, EMA rates, observer gains, etc.) are fixed in `src/constants.py` and derived from the cited literature.
 
-## Codebase Structure
-
-```
-src/
-  config.py              Configuration schema (SPALFConfig, CalibrationResult)
-  constants.py           Fixed structural constants (30 values)
-  constraints.py         C1/C2/C3 violations + AL-CoLe augmented Lagrangian
-  checkpoint.py          safetensors-based checkpoint save/load
-  runtime.py             CUDA setup and seeding
-
-  model/
-    sae.py               StratifiedSAE: encoder + stratified decoder
-    jumprelu.py           JumpReLU activation with per-feature STE
-    initialization.py    Matched-filter encoder + threshold calibration
-
-  whitening/
-    whitener.py          SoftZCAWhitener (full and low-rank variants)
-    covariance.py        Welford online covariance estimation
-
-  control/
-    adrc.py              ADRC controller + Extended State Observer
-    capu.py              Modified CAPU adaptive penalty
-    ema_filter.py        Dual-rate EMA filtering (fast/slow)
-
-  training/
-    trainer.py           SPALFTrainer orchestrator + DiscretizationSchedule
-    calibration.py       Covariance estimation, whitener construction, SAE init
-    phase1.py            Constrained sparse optimization loop
-    phase2.py            End-to-end causal calibration loop
-    logging.py           Structured training metrics
-
-  data/
-    activation_store.py  Token streaming + hook-based activation capture
-    buffer.py            Shuffled ring buffer for batch construction
-    patching.py          SAE-patched forward passes (TransformerLens + HuggingFace)
-
-  kernels/
-    jumprelu_kernel.py   Triton fused JumpReLU (gate + L0 + discretization)
-    ortho_kernel.py      Triton co-activation orthogonality
-
-  evaluation/
-    __init__.py          drift_fidelity, feature_absorption_rate
-    downstream_loss.py   KL divergence via causal patching
-    sparsity_frontier.py L0-CE Pareto frontier
-
-  scripts/
-    train.py             CLI: spalf-train
-    evaluate.py          CLI: spalf-eval
-
-experiments/
-  pythia_1b.yaml         Pythia-1.4B layer 6
-  llama3_8b.yaml         Llama-3-8B layer 16
-```
-
 **36 files, ~3,500 lines.**
 
 ## Checkpoints
