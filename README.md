@@ -128,10 +128,6 @@ SPALF requires 4 hyperparameters. All other values are self-calibrated:
 | `R2_target` | 0.97 | Reconstruction explained variance |
 | `lr` | 3e-4 | Adam learning rate |
 
-Structural constants (whitening tolerance, drift budget, EMA rates, observer gains, etc.) are fixed in `src/constants.py` and derived from the cited literature.
-
-**36 files, ~3,500 lines.**
-
 ## Checkpoints
 
 Checkpoints use safetensors and are saved as directories:
