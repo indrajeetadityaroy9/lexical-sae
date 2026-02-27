@@ -28,9 +28,6 @@ htmlcov/
 
 # Data
 /data/
-*.csv
-*.json
-*.jsonl
 
 # Logs
 *.log
@@ -49,13 +46,12 @@ wandb/
 # Compiled extensions
 *.so
 
-# Results/benchmarks
-results/
-.benchmarks/
-benchmark_results/
-
-# Checkpoints
+# Runs / checkpoints
+runs/
 checkpoints/
 
 # Experiment outputs
 experiments/*/outputs/
+
+# Reference papers (large PDFs)
+papers/

@@ -1,204 +1,259 @@
-# Circuit-Anchored JumpReLU Transcoder (CAJT)
+# SPALF: Spectrally-Preconditioned Augmented Lagrangian on Stratified Feature Manifolds
 
-A circuit-anchored sparse transcoder that repurposes the masked language model vocabulary as a sparse feature dictionary. The architecture provides exact per-prediction attributions via a Direct Linear Attribution (DLA) identity, and enables surgical concept removal with algebraic guarantees.
+Training interpretable sparse autoencoders via constrained optimization with control-theoretic dual dynamics.
 
-1. **JumpReLU gating** with exact binary gates and sigmoid straight-through estimation ([Rajamanoharan et al., 2024](https://arxiv.org/abs/2407.14435))
-2. **KL-divergence completeness loss** ensuring sparse circuits preserve the full model's output distribution
-3. **Contrastive separation loss** with hard negative mining and learned margin for orthogonal per-class circuits
-4. **Frequency-based feature targeting** penalizing under-active features via continuous EMA frequency tracking
-5. **GECO constrained optimization** ([Rezende & Viola, 2018](https://arxiv.org/abs/1810.00597)) balancing accuracy against circuit interpretability
+## Abstract
 
-## Method
+Sparse autoencoders (SAEs) decompose transformer activations into interpretable features, but standard training treats reconstruction and sparsity as competing objectives with manually tuned trade-offs. SPALF recasts SAE training as a single constrained optimization problem: **minimize the expected activation rate of a JumpReLU dictionary over a spectrally-preconditioned activation space, subject to faithfulness, anchoring, and diversity constraints, solved via an augmented Lagrangian whose dual dynamics use active disturbance rejection.**
 
-**JumpReLU** ([Rajamanoharan et al., 2024](https://arxiv.org/abs/2407.14435)) uses a learnable per-dimension threshold θ (stored as log θ for positivity) with a hard binary Heaviside gate in the forward pass and a sigmoid straight-through estimator in the backward pass. Active features retain their full `relu(x)` magnitude. The binary gate ensures the DLA identity holds exactly during both training and evaluation, not just at inference time.
+Six components — Soft-ZCA whitening, a stratified decoder, CAGE-inspired discretization correction, ADRC-controlled dual ascent, modified CAPU penalty adaptation, and two-phase training — are unified under this formulation. The system requires **4 user-facing hyperparameters**; all remaining parameters (18 values) are self-calibrated from data.
 
-**DLA Identity.** For the ReLU MLP classifier `fc1 → ReLU → fc2`, the effective weight matrix is `W_eff(x) = W₂ · diag(D(x)) · W₁` where `D(x) = 𝟙[fc1(x) > 0]` is the binary ReLU activation mask. Since both the JumpReLU gate and the classifier ReLU are piecewise-linear, `W_eff` is locally constant for each input and the prediction decomposes exactly:
+## Method Overview
+
+SPALF solves the following augmented Lagrangian:
 
 ```
-logit[c] = Σⱼ s[j] · W_eff[c, j] + b_eff[c]
+L(theta, lambda, rho) = l0_corr(theta) + sum_i rho_i * Psi(g_i(theta), lambda_i / rho_i)
 ```
 
-This identity is verified algebraically (error < 1e-3) for every input at evaluation time.
+where `theta` are primal SAE parameters, `lambda` are dual variables governed by ADRC, `rho` are per-constraint adaptive penalties, `l0_corr` is a discretization-corrected sparsity objective, and `Psi` is the AL-CoLe smooth inequality penalty.
 
-### Circuit-Integrated Training
+### Components
 
-Training uses a two-phase GECO-constrained optimization with **Schedule-Free AdamW** ([Defazio & Mishchenko, 2024](https://arxiv.org/abs/2405.15682)), which subsumes LR scheduling, warmup, and model EMA into a single optimizer via Primal Averaging:
+| Component | Role | Reference |
+|:---|:---|:---|
+| **Soft-ZCA whitening** | Isotropic preconditioning of residual stream activations | [Kiani et al., 2024](https://arxiv.org/abs/2411.17538) |
+| **Stratified decoder** | *V* anchored features (tied to unembedding) + *F-V* free features | [Dinesh & Nanda, 2025](https://arxiv.org/abs/2512.05534) |
+| **Discretization correction** | Scheduled penalty reducing STE bias in JumpReLU thresholds | [Defossez et al., 2025](https://arxiv.org/abs/2510.18784) |
+| **ADRC dual dynamics** | ESO + PI controller for Lagrange multiplier updates | [Wang & Yang, 2026](https://arxiv.org/abs/2601.18142) |
+| **Modified CAPU** | Non-monotone per-constraint adaptive penalty weights | [Chen et al., 2025](https://arxiv.org/abs/2508.15695) |
+| **Two-phase training** | Phase 1: constrained sparse opt; Phase 2: end-to-end KL calibration | [Bricken et al., 2025](https://arxiv.org/abs/2503.17272) |
 
-**Phase 1 — Warmup** (first ~20% of steps): Cross-entropy only. The GECO controller records CE values and sets its constraint threshold τ from the 25th percentile.
+### Architecture
 
-**Phase 2 — Circuit optimization** (remaining steps): GECO constrains CE ≤ τ while minimizing the circuit objective:
+**Encoder.** A single matrix `W_enc` in R^{F x d} operates on whitened activations `x_tilde = W_white(x - mu)`. JumpReLU gating with per-feature learnable thresholds produces sparse codes `z`.
 
-| Loss | Purpose | Formulation |
-|------|---------|-------------|
-| **KL Completeness** | Top-k% sparse dims (by attribution magnitude) preserve the full model's output distribution | `KL(p_full ‖ p_masked)` with soft circuit masking |
-| **Contrastive Separation** | Per-class attribution circuits are orthogonal | Triplet margin loss with learned margin against class centroid hard negatives |
-| **Gate Sparsity (L0)** | Penalize number of open gates | `mean(σ((z − θ) / ε))`, differentiable L0 proxy |
-| **Feature Frequency Penalty** | Resurrect under-active features | Penalize high `log θ` for features with EMA frequency below `sparsity_target × 0.1` |
+**Decoder.** Partitioned into two strata:
+- **Stratum A (Anchored):** `W_dec_A` in R^{d x V}, initialized to the model's unembedding matrix. Subject to a drift constraint that permits controlled departure from vocabulary directions.
+- **Stratum B (Free):** `W_dec_B` in R^{d x (F-V)}, random unit-norm columns. Subject to a co-activation orthogonality constraint.
 
-The combined Lagrangian is:
+This stratification is motivated by the SDL non-identifiability theorem ([Dinesh & Nanda, 2025](https://arxiv.org/abs/2512.05534), Theorem 3.4), which proves that unconstrained SAEs can converge to zero-loss solutions recovering no ground-truth features.
+
+### Constraints
+
+Three inequality constraints `g_i(theta) <= 0` encode structural priors:
+
+| Constraint | Definition | Threshold |
+|:---|:---|:---|
+| **C1 — Faithfulness** | MSE in whitened space (Mahalanobis norm) | `tau_faith = (1 - R2_target) * d` |
+| **C2 — Vocabulary drift** | Frobenius norm of anchored decoder departure | `tau_drift = delta_drift^2 * \|\|W_vocab\|\|_F^2` |
+| **C3 — Co-activation orthogonality** | Mean pairwise cos^2 of active decoder columns | `tau_ortho = c_ortho / d` |
+
+### Control System
+
+The dual variables `lambda_i` are updated via an ADRC controller that combines PI feedback with disturbance rejection:
 
 ```
-L = (cc_loss + sep_loss + gate_loss + freq_loss) + λ_ce · CE_loss
+u_i = k_ap * (v_fast_i - v_fast_prev_i) + k_i * v_slow_i - f_hat_i
+lambda_i <- max(0, lambda_i + u_i)
 ```
 
-where λ_ce is adapted via EMA-smoothed dual ascent with step size η = 2 / (steps_per_epoch + 1).
+where `k_ap = 2*omega_o`, `k_i = omega_o^2` yield critically damped dynamics, and `f_hat_i` is the Extended State Observer's disturbance estimate. The penalty weights `rho_i` adapt via a non-monotone variant of CAPU that allows relaxation when violations decrease. Both operate on a slow timescale (every 100 steps), maintaining two-timescale separation from primal Adam updates.
 
-Additional training components: Schedule-Free AdamW with gradient centralization ([Yong et al., 2020](https://arxiv.org/abs/2004.01461)), derived weight decay (0.1 × lr, Loshchilov-Hutter scaling), early stopping, and label smoothing.
+### Training Pipeline
 
-### Evaluation
-
-The mechanistic evaluation pipeline verifies:
-- **DLA verification error** — algebraic identity holds per sample
-- **Circuit completeness** — top-k% of active dims at multiple fractions (1%, 5%, 10%, 20%, 50%)
-- **Circuit separation** — cosine similarity and Jaccard overlap between per-class circuits
-- **ERASER metrics** ([DeYoung et al., 2020](https://arxiv.org/abs/1911.03429)) — comprehensiveness, sufficiency, AOPC
-- **Explainer comparison** — vs. LIME, Integrated Gradients, Attention baselines
-- **SAE baseline comparison** — reconstruction error and active feature counts
-- **Layer-wise attribution** — distribution across backbone layers
-
-### Surgical Concept Removal
-
-The sparse bottleneck enables verifiable concept removal. Since `logit[c] = Σⱼ s[j] · W_eff[c,j] + b_eff[c]`, zeroing `s[j]` removes token j's contribution to all classes with algebraic certainty.
-
-The surgery pipeline identifies identity-correlated tokens in class attribution centroids and compares:
-1. **Baseline** — unmodified FPR gap per identity group
-2. **Surgical suppression** — zero sparse activations for target tokens via `SuppressedModel` (reversible, inference-time)
-3. **LEACE erasure** ([Belrose et al., 2023](https://arxiv.org/abs/2306.03819)) — covariance-based concept projection as a rigorous baseline
+```
+1. Calibration     Stream tokens, compute covariance, build whitener, set thresholds
+2. Initialization  Matched-filter encoder, vocabulary-anchored decoder, threshold calibration
+3. Phase 1         Constrained sparse optimization (convergence-gated)
+4. Phase 2         End-to-end causal calibration with KL divergence (~3% of budget)
+```
 
 ## Installation
+
+Requires Python >= 3.10 and CUDA.
 
 ```bash
 pip install -e .
 ```
 
-Requires Python ≥ 3.10, PyTorch ≥ 2.4.0, and a CUDA-enabled GPU.
+**Dependencies:** PyTorch >= 2.4, TransformerLens >= 2.0, Transformers >= 4.40, Triton >= 3.0, safetensors >= 0.4, Accelerate >= 1.0
 
 ## Usage
 
-### Classification (train + mechanistic evaluation)
+### Training
 
 ```bash
-lexical-sae --config experiments/imdb.yaml
+spalf-train experiments/pythia_1b.yaml
 ```
 
-### Surgical Concept Removal
+Example configuration (`experiments/pythia_1b.yaml`):
+
+```yaml
+model_name: "EleutherAI/pythia-1.4b"
+hook_point: "blocks.6.hook_resid_post"
+dataset: "monology/pile-uncopyrighted"
+total_tokens: 1_000_000_000
+batch_size: 4096
+seq_len: 128
+R2_target: 0.97
+lr: 3e-4
+seed: 42
+output_dir: "runs/pythia_1b"
+```
+
+### Evaluation
 
 ```bash
-lexical-sae --config experiments/civilcomments_surgery.yaml
+spalf-eval experiments/pythia_1b.yaml
 ```
 
-### Ablation Studies
+The config must specify a `checkpoint` field pointing to a checkpoint directory. Four evaluation suites are available:
 
-```bash
-lexical-sae --config experiments/imdb_ablation.yaml
-```
-
-### Long-Context Evaluation
-
-```bash
-lexical-sae --config experiments/imdb_long_context.yaml
-```
+| Suite | Measures |
+|:---|:---|
+| `downstream_loss` | KL divergence under SAE-patched forward passes |
+| `sparsity_frontier` | L0 vs. cross-entropy Pareto trade-off |
+| `drift_fidelity` | Cosine similarity between anchored decoder and vocabulary |
+| `feature_absorption` | Free feature alignment with vocabulary directions ([Engels et al., 2024](https://arxiv.org/abs/2409.14507)) |
 
 ### Configuration
 
-Experiments are defined by YAML files loaded into dataclass schemas:
+SPALF requires 4 hyperparameters. All other values are self-calibrated:
 
-```yaml
-experiment_name: "paper_imdb"
-output_dir: "results/paper/imdb"
+| Parameter | Default | Description |
+|:---|:---|:---|
+| `F` | `32 * d_model` | Dictionary size (0 = auto) |
+| `L0_target` | `ceil(F / 400)` | Target active features per input (None = auto) |
+| `R2_target` | 0.97 | Reconstruction explained variance |
+| `lr` | 3e-4 | Adam learning rate |
 
-data:
-  dataset_name: "imdb"
-  train_samples: -1   # full split
-  test_samples: -1
+Structural constants (whitening tolerance, drift budget, EMA rates, observer gains, etc.) are fixed in `src/constants.py` and derived from the cited literature.
 
-model:
-  name: "answerdotai/ModernBERT-base"
+## Codebase Structure
 
-training:
-  sparsity_target: 0.1
-  warmup_fraction: 0.2
-  pooling: "max"  # "max" or "attention"
-  learning_rate: 3e-4  # Schedule-Free AdamW base LR
+```
+src/
+  config.py              Configuration schema (SPALFConfig, CalibrationResult)
+  constants.py           Fixed structural constants (30 values)
+  constraints.py         C1/C2/C3 violations + AL-CoLe augmented Lagrangian
+  checkpoint.py          safetensors-based checkpoint save/load
+  runtime.py             CUDA setup and seeding
+
+  model/
+    sae.py               StratifiedSAE: encoder + stratified decoder
+    jumprelu.py           JumpReLU activation with per-feature STE
+    initialization.py    Matched-filter encoder + threshold calibration
+
+  whitening/
+    whitener.py          SoftZCAWhitener (full and low-rank variants)
+    covariance.py        Welford online covariance estimation
+
+  control/
+    adrc.py              ADRC controller + Extended State Observer
+    capu.py              Modified CAPU adaptive penalty
+    ema_filter.py        Dual-rate EMA filtering (fast/slow)
+
+  training/
+    trainer.py           SPALFTrainer orchestrator + DiscretizationSchedule
+    calibration.py       Covariance estimation, whitener construction, SAE init
+    phase1.py            Constrained sparse optimization loop
+    phase2.py            End-to-end causal calibration loop
+    logging.py           Structured training metrics
+
+  data/
+    activation_store.py  Token streaming + hook-based activation capture
+    buffer.py            Shuffled ring buffer for batch construction
+    patching.py          SAE-patched forward passes (TransformerLens + HuggingFace)
+
+  kernels/
+    jumprelu_kernel.py   Triton fused JumpReLU (gate + L0 + discretization)
+    ortho_kernel.py      Triton co-activation orthogonality
+
+  evaluation/
+    __init__.py          drift_fidelity, feature_absorption_rate
+    downstream_loss.py   KL divergence via causal patching
+    sparsity_frontier.py L0-CE Pareto frontier
+
+  scripts/
+    train.py             CLI: spalf-train
+    evaluate.py          CLI: spalf-eval
+
+experiments/
+  pythia_1b.yaml         Pythia-1.4B layer 6
+  llama3_8b.yaml         Llama-3-8B layer 16
 ```
 
-Supported datasets: `banking77`, `imdb`, `yelp`, `civilcomments`, `beavertails`.
+**36 files, ~3,500 lines.**
 
-## Comparison with Post-Hoc Sparse Autoencoders
+## Checkpoints
 
-|  | Post-Hoc SAE | Lexical-SAE (CAJT) |
-|---|---|---|
-| **Training** | After model (frozen activations) | End-to-end (circuit losses co-trained) |
-| **Reconstruction** | Lossy (x ≈ x̂) | Exact (DLA identity, error < 1e-3) |
-| **Feature dictionary** | Learned latent directions | Vocabulary tokens (human-readable) |
-| **Intervention** | Approximate steering | Exact zeroing (s_j = 0, algebraic guarantee) |
-| **Activation** | TopK / ReLU | JumpReLU (binary gate + sigmoid STE) |
-| **Dead features** | TopK avoids by design | Frequency-based feature targeting via EMA |
-| **Circuit losses** | None (post-hoc analysis only) | KL completeness + contrastive separation |
-| **Optimization** | Standard AdamW + scheduler | Schedule-Free AdamW (no scheduler, no EMA) |
+Checkpoints use safetensors and are saved as directories:
 
-## Known Limitations
+```
+spalf_phase2_step244140/
+  model.safetensors        SAE weights
+  tensors.safetensors      Whitener state + W_vocab
+  control.safetensors      ADRC/CAPU/EMA state
+  optimizer.safetensors    Adam state
+  metadata.json            Scalars, config, calibration parameters
+```
 
-- **Vocabulary-level granularity.** Attributions map to individual vocabulary tokens (subwords), not input spans. A clean-vocab filter masks subword continuations and special tokens for display.
-- **Input-dependent W_eff.** The effective weight matrix varies per input due to the ReLU activation mask. Explanations are per-sample, not global.
-- **Encoder family scope.** Evaluated on ModernBERT-base. Compatible with any `AutoModelForMaskedLM` backbone but other encoders are not yet benchmarked.
+## Theoretical Grounding
+
+SPALF draws on and integrates results from several lines of work. The table below maps each component to its primary theoretical reference and the nature of the transfer:
+
+| Component | Reference | Transfer Status |
+|:---|:---|:---|
+| Soft-ZCA whitening | [Kiani et al., 2024](https://arxiv.org/abs/2411.17538); [Kessy et al., 2018](https://arxiv.org/abs/1804.08450) | Direct application |
+| Stratified anchoring | [Dinesh & Nanda, 2025](https://arxiv.org/abs/2512.05534), Theorem 3.4 | Motivates architecture; partial anchoring validated empirically |
+| JumpReLU STE | [Rajamanoharan et al., 2024](https://arxiv.org/abs/2407.14435) | Direct application |
+| AL-CoLe smooth penalty | [Hounie et al., 2025](https://arxiv.org/abs/2510.20995), Theorem 2.1 | Penalty function adopted; strong duality theorem does not transfer (per-constraint rho, ADRC updates) |
+| PI = ALM equivalence | [Gemp et al., 2025](https://arxiv.org/abs/2509.22500), Theorem 1 | Conceptual motivation; strict equivalence broken by Adam, EMA, ESO |
+| ADRC + ESO | [Wang & Yang, 2026](https://arxiv.org/abs/2601.18142), Theorem C.7 | ISS tracking bound conjectured for first-order setting; proven for second-order |
+| CAGE discretization | [Defossez et al., 2025](https://arxiv.org/abs/2510.18784), Theorem 1 | Empirically motivated; convergence guarantee does not transfer to discontinuous JumpReLU |
+| Modified CAPU | [Chen et al., 2025](https://arxiv.org/abs/2508.15695), Theorem 1 | Non-monotone variant loses monotone convergence guarantee; boundedness preserved |
+| Two-timescale separation | [Doan et al., 2021](https://arxiv.org/abs/2112.03515) | Timescale ratio r >= 10 satisfied by EMA rates |
 
 ## References
 
-### Core Method
+### Core SAE Methods
 
-- Rajamanoharan, S., et al. (2024). Jumping Ahead: Improving Reconstruction Fidelity with JumpReLU Sparse Autoencoders. [`arXiv:2407.14435`](https://arxiv.org/abs/2407.14435)
-  *JumpReLU activation with binary Heaviside gate (forward) and sigmoid STE (backward). Provides the gating mechanism that preserves the exact DLA identity.*
+- [Rajamanoharan et al., 2024](https://arxiv.org/abs/2407.14435) — JumpReLU Sparse Autoencoders. *ICLR 2025.*
+- [Gao et al., 2024](https://arxiv.org/abs/2406.04093) — Scaling and Evaluating Sparse Autoencoders (TopK). *OpenAI, 2024.*
+- [Bussmann et al., 2024](https://arxiv.org/abs/2412.06410) — BatchTopK Sparse Autoencoders. *2024.*
+- [Koppel et al., 2025](https://arxiv.org/abs/2502.12892) — Archetypal SAE (A-SAE / RA-SAE). *ICML 2025.*
+- [Bricken et al., 2025](https://arxiv.org/abs/2503.17272) — Revisiting End-to-End SAE Training. *2025.*
 
-- Formal, T., Piwowarski, B., & Clinchant, S. (2021). SPLADE: Sparse Lexical and Expansion Model for First Stage Ranking. *SIGIR*. [`arXiv:2107.05720`](https://arxiv.org/abs/2107.05720)
-  *MLM-logit sparse representation architecture. Lexical-SAE repurposes this from information retrieval to interpretable classification.*
+### Feature Geometry and Interpretability
 
-- Balestriero, R. & Baraniuk, R. (2018). A Spline Theory of Deep Networks. *ICML*. [`arXiv:1802.09210`](https://arxiv.org/abs/1802.09210)
-  *Piecewise-linear structure of ReLU networks. Each input maps to a locally linear region with a fixed effective weight matrix, enabling the DLA decomposition.*
+- [Dinesh & Nanda, 2025](https://arxiv.org/abs/2512.05534) — Unified Theory of Sparse Dictionary Learning. *ICLR 2026.*
+- [Engels et al., 2024](https://arxiv.org/abs/2409.14507) — Feature Absorption in SAEs. *NeurIPS 2025.*
+- [Park et al., 2025](https://arxiv.org/abs/2501.17727) — Not All Language Model Features Are Linear. *ICLR 2025.*
+- [Elhage et al., 2026](https://arxiv.org/abs/2602.02385) — Transformers Learn Factored Representations. *2026.*
+- [Chanin et al., 2026](https://arxiv.org/abs/2602.14111) — SAE Sanity Checks: Random Baselines. *2026.*
 
-- Rezende, D. J. & Viola, F. (2018). Taming VAEs. [`arXiv:1810.00597`](https://arxiv.org/abs/1810.00597)
-  *GECO constrained optimization. Provides the Lagrangian framework balancing classification accuracy against circuit interpretability losses.*
+### Whitening and Preconditioning
 
-### Optimization
+- [Kiani et al., 2024](https://arxiv.org/abs/2411.17538) — Soft-ZCA Whitening. *2024.*
+- [Kessy et al., 2018](https://arxiv.org/abs/1804.08450) — Optimal Whitening and Decorrelation. *2018.*
+- [Balagansky & Gavves, 2025](https://arxiv.org/abs/2511.13981) — Data Whitening Improves SAE Learning. *AAAI 2026.*
 
-- Defazio, A. & Mishchenko, K. (2024). The Road Less Scheduled. [`arXiv:2405.15682`](https://arxiv.org/abs/2405.15682)
-  *Schedule-Free AdamW optimizer. Subsumes LR scheduling, warmup, and model EMA via Primal Averaging, replacing three separate mechanisms with a single optimizer.*
+### Control Theory and Constrained Optimization
 
-- Yong, H., et al. (2020). Gradient Centralization: A New Optimization Technique for Deep Neural Networks. [`arXiv:2004.01461`](https://arxiv.org/abs/2004.01461)
-  *Parameter-free gradient conditioning. Constrains gradients to the zero-mean hyperplane, improving Lipschitz smoothness without tunable hyperparameters.*
+- [Gemp et al., 2025](https://arxiv.org/abs/2509.22500) — PI Control = Augmented Lagrangian. *ICLR 2026.*
+- [Wang & Yang, 2026](https://arxiv.org/abs/2601.18142) — ADRC-Lagrangian Methods for Safety. *2026.*
+- [Stooke et al., 2024](https://arxiv.org/abs/2406.04558) — nuPI: PI Controllers for Constrained Optimization. *ICML 2024.*
+- [Hounie et al., 2025](https://arxiv.org/abs/2510.20995) — AL-CoLe: Augmented Lagrangian for Constrained Learning. *NeurIPS 2025.*
+- [Chen et al., 2025](https://arxiv.org/abs/2508.15695) — CAPU: Conditionally Adaptive Penalty Updates. *2025.*
 
-### Sparsity and Dead Feature Prevention
+### Non-Smooth Optimization
 
-- Gao, L., et al. (2024). Scaling and Evaluating Sparse Autoencoders. [`arXiv:2406.04093`](https://arxiv.org/abs/2406.04093)
-  *SAE evaluation methodology (downstream loss, probe loss, ablation sparsity). Informs the frequency-based feature targeting approach adapted here.*
+- [Defossez et al., 2025](https://arxiv.org/abs/2510.18784) — CAGE: Curvature-Aware Gradient Estimation. *2025.*
+- [Doan et al., 2021](https://arxiv.org/abs/2112.03515) — Multi-Timescale Stochastic Approximation. *2025.*
 
-- Lassance, C., et al. (2024). SPLADE-v3: New Baselines for SPLADE. [`arXiv:2403.06789`](https://arxiv.org/abs/2403.06789)
-  *FLOPS-regularized sparse representation training informing the sparsity control approach.*
+### Evaluation and Benchmarks
 
-- Lei, T., et al. (2025). Sparse Attention Post-Training. [`arXiv:2512.05865`](https://arxiv.org/abs/2512.05865)
-  *Cross-layer transcoder work informing sparse representation design and attribution across layers.*
-
-### Evaluation and Interpretability
-
-- DeYoung, J., et al. (2020). ERASER: A Benchmark to Evaluate Rationalized NLP Models. *ACL*. [`arXiv:1911.03429`](https://arxiv.org/abs/1911.03429)
-  *Comprehensiveness, sufficiency, and AOPC metrics for attribution faithfulness evaluation.*
-
-- Belrose, N., et al. (2023). LEACE: Perfect Linear Concept Erasure in Closed Form. *NeurIPS*. [`arXiv:2306.03819`](https://arxiv.org/abs/2306.03819)
-  *Covariance-based concept erasure baseline for surgical removal experiments.*
-
-- Sundararajan, M., Taly, A., & Yan, Q. (2017). Axiomatic Attribution for Deep Networks. *ICML*. [`arXiv:1703.01365`](https://arxiv.org/abs/1703.01365)
-  *Integrated Gradients baseline for explainer comparison.*
-
-### Mechanistic Interpretability
-
-- Elhage, N., et al. (2021). A Mathematical Framework for Transformer Circuits. *Anthropic*.
-  *Foundational framework for understanding transformer computations as circuits.*
-
-- Conmy, A., et al. (2023). Towards Automated Circuit Discovery for Mechanistic Interpretability. *NeurIPS*. [`arXiv:2304.14997`](https://arxiv.org/abs/2304.14997)
-  *Circuit discovery methodology contextualizing the circuit extraction evaluation.*
-
-- Marks, S., et al. (2024). Sparse Feature Circuits. *ICLR*. [`arXiv:2403.19647`](https://arxiv.org/abs/2403.19647)
-  *Sparse circuit analysis connecting SAE features to model behavior.*
-
-- Chen, J., et al. (2025). Rethinking Circuit Completeness. [`arXiv:2505.10039`](https://arxiv.org/abs/2505.10039)
-  *Motivates the completeness loss design and evaluation methodology.*
+- [Karvonen et al., 2025](https://arxiv.org/abs/2503.09532) — SAEBench. *2025.*
+- [Lindsey et al., 2026](https://arxiv.org/abs/2602.14687) — SynthSAEBench. *2026.*
+- [Balagansky et al., 2025](https://arxiv.org/abs/2505.20254) — Feature Consistency (PW-MCC). *2025.*

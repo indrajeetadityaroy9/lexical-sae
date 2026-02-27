@@ -1,0 +1,16 @@
+model_name: "EleutherAI/pythia-1.4b"
+hook_point: "blocks.6.hook_resid_post"
+dataset: "monology/pile-uncopyrighted"
+total_tokens: 1_000_000_000
+batch_size: 4096
+seq_len: 128
+R2_target: 0.97
+lr: 3e-4
+seed: 42
+output_dir: "runs/pythia_1b"
+checkpoint: "runs/pythia_1b/spalf_phase2_final.pt"
+eval_suites:
+  - downstream_loss
+  - sparsity_frontier
+  - drift_fidelity
+  - feature_absorption
