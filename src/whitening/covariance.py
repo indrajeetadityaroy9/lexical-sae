@@ -8,26 +8,17 @@ import torch
 
 
 class OnlineCovariance:
-    """Welford online covariance estimation (§7.1).
-
-    Streams activations and accumulates mean + covariance using Welford's
-    numerically stable online algorithm. Checks convergence by comparing
-    current covariance to a snapshot taken Δ samples ago.
-    """
+    """Welford online covariance estimation with snapshot-based convergence."""
 
     def __init__(self, d: int, delta_cov: float = 1e-3) -> None:
         self.d = d
         self.delta_cov = delta_cov
-        # Convergence check interval: Δ = min(ceil(d²), 10^6) tokens
         self.check_interval = min(math.ceil(d**2), 1_000_000)
 
-        # Running statistics (float64 for numerical stability)
         self._n = 0
         self._mean = torch.zeros(d, dtype=torch.float64)
-        # M2: sum of outer products of deviations (unnormalized covariance * n)
         self._M2 = torch.zeros(d, d, dtype=torch.float64)
 
-        # Snapshot for convergence check
         self._snapshot_cov: torch.Tensor | None = None
         self._n_at_snapshot = 0
         self._converged = False
@@ -41,7 +32,6 @@ class OnlineCovariance:
         x = x.to(dtype=torch.float64, device="cpu")
         batch_size = x.shape[0]
 
-        # Batch Welford update
         batch_mean = x.mean(dim=0)
         batch_n = batch_size
 
@@ -49,8 +39,6 @@ class OnlineCovariance:
         new_n = self._n + batch_n
         new_mean = self._mean + delta * (batch_n / new_n)
 
-        # Update M2 using the parallel algorithm
-        # M2_new = M2_old + batch_M2 + delta * delta^T * (n_old * batch_n / new_n)
         batch_centered = x - batch_mean  # [batch, d]
         batch_M2 = batch_centered.T @ batch_centered  # [d, d]
         self._M2 += batch_M2 + torch.outer(delta, delta) * (
@@ -60,7 +48,6 @@ class OnlineCovariance:
         self._mean = new_mean
         self._n = new_n
 
-        # Check convergence periodically
         if (
             not self._converged
             and self._n - self._n_at_snapshot >= self.check_interval

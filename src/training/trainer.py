@@ -1,4 +1,4 @@
-"""Top-level SPALF trainer: calibration, initialization, Phase 1, Phase 2."""
+"""Top-level SPALF trainer."""
 
 from __future__ import annotations
 
@@ -31,14 +31,7 @@ from src.whitening.whitener import SoftZCAWhitener
 
 
 class DiscretizationSchedule:
-    """Scheduled discretization penalty weight (§3.1).
-
-    λ_disc(t) = 0                                    if t/T ≤ s_disc
-    λ_disc(t) = λ_max · (t/T - s_disc) / (1 - s_disc)   if t/T > s_disc
-
-    Default: silent for first 80% (s_disc=0.8), then linear ramp to λ_max=1.0.
-    Late onset ensures correction doesn't interfere with early feature discovery.
-    """
+    """Piecewise-linear discretization weight schedule."""
 
     def __init__(
         self,
@@ -51,7 +44,7 @@ class DiscretizationSchedule:
         self.lambda_max = lambda_max
 
     def get_lambda(self, step: int) -> float:
-        """Get discretization penalty weight at current step."""
+        """Return the discretization penalty at step."""
         r = step / self.T_total
         if r <= self.s_disc:
             return 0.0
@@ -59,29 +52,17 @@ class DiscretizationSchedule:
 
 
 class SPALFTrainer:
-    """Orchestrates the full SPALF training pipeline.
-
-    Sequence:
-    1. Create ActivationStore + Buffer
-    2. Run calibration (covariance, whitener, threshold computation)
-    3. Create and initialize StratifiedSAE
-    4. Measure initial violations for CAPU calibration
-    5. Create control system components + optimizer
-    6. Run Phase 1 (constrained sparse optimization)
-    7. Run Phase 2 (end-to-end causal calibration)
-    8. Save checkpoint
-    """
+    """Orchestrates calibration, training phases, and checkpointing."""
 
     def __init__(self, config: SPALFConfig) -> None:
         self.config = config
         self.device = DEVICE
 
     def train(self) -> StratifiedSAE:
-        """Run full training pipeline. Returns trained SAE."""
+        """Run full training pipeline."""
         config = self.config
         set_seed(config.seed)
 
-        # === 1. Create activation store and buffer ===
         print(f"Creating activation store for {config.model_name}")
         store = ActivationStore(
             model_name=config.model_name,
@@ -94,24 +75,20 @@ class SPALFTrainer:
 
         buffer = ActivationBuffer(store, buffer_size=2**20)
 
-        # === 2. Calibration: covariance, whitener, thresholds ===
         print("Running calibration phase...")
         cal = run_calibration(config, store)
         print(f"d={cal.d}, F={cal.F}, L0_target={cal.L0_target}, V={cal.V}")
 
-        # === 3. Create and initialize SAE ===
         print("Initializing StratifiedSAE...")
         sae = initialize_from_calibration(cal, store)
         sae = sae.to(self.device)
         print(f"SAE initialized: d={sae.d}, F={sae.F}, V={sae.V}, F_free={sae.F_free}")
 
-        # === 4. Measure initial violations for CAPU calibration ===
         initial_violations = self._measure_initial_violations(
             sae, cal.whitener, cal.W_vocab, buffer, cal, config.batch_size
         )
         print(f"Initial violations: {initial_violations.tolist()}")
 
-        # === 5. Create control system components ===
         ema = DualRateEMA(
             n_constraints=3,
             beta_fast=BETA_FAST,
@@ -148,7 +125,6 @@ class SPALFTrainer:
             cal.whitener.alpha, cal.whitener.effective_rank, cal.V
         )
 
-        # === 6. Phase 1 ===
         print("Starting Phase 1 training...")
         phase1_end_step = run_phase1(
             sae=sae,
@@ -172,7 +148,6 @@ class SPALFTrainer:
             phase1_end_step, phase=1,
         )
 
-        # === 7. Phase 2 ===
         print("Starting Phase 2 training...")
         run_phase2(
             sae=sae,
@@ -193,7 +168,6 @@ class SPALFTrainer:
             start_step=phase1_end_step + 1,
         )
 
-        # === 8. Save final checkpoint ===
         self._save_checkpoint(
             sae, cal, config, adrc, capu, ema, optimizer,
             total_steps, phase=2,

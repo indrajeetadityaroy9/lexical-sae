@@ -30,18 +30,13 @@ def load_from_checkpoint(
 
 
 def run_eval(config: SPALFConfig) -> dict:
-    """Run all requested evaluation suites.
-
-    Returns:
-        Dictionary of results keyed by suite name.
-    """
+    """Run requested evaluation suites."""
     set_seed(config.seed)
 
     sae, whitener, W_vocab = load_from_checkpoint(config)
     suites = config.eval_suites
     results = {}
 
-    # ActivationStore is expensive (loads full model). Only create if needed.
     needs_store = "downstream_loss" in suites or "sparsity_frontier" in suites
     store = None
     if needs_store:
@@ -85,17 +80,13 @@ def write_results(config: SPALFConfig, results: dict) -> None:
     out_dir = Path(config.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Stamp the exact config used
     config.save(out_dir / "eval_config.yaml")
 
-    # Write metrics
     metrics_path = out_dir / "metrics.json"
     with open(metrics_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
 
     print(f"Results written to {metrics_path}")
-
-    # Print summary
     for suite_name, suite_results in results.items():
         if isinstance(suite_results, dict):
             summary = ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"

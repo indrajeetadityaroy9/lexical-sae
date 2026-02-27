@@ -12,21 +12,10 @@ def drift_fidelity(
     W_dec_A: Tensor,
     W_vocab: Tensor,
 ) -> dict[str, float]:
-    """Compute cosine similarity between anchored decoder and vocabulary columns.
-
-    Measures how well anchored features preserve their vocabulary alignment.
-
-    Args:
-        W_dec_A: [d, V] anchored decoder columns.
-        W_vocab: [d, V] original vocabulary/unembedding matrix.
-
-    Returns:
-        Dict with mean, min, max cosine similarity, and fraction > 0.99.
-    """
-    # Column-wise cosine similarity
+    """Compute column-wise cosine similarity between anchored decoder and vocabulary."""
     A_norm = W_dec_A / W_dec_A.norm(dim=0, keepdim=True)
     V_norm = W_vocab / W_vocab.norm(dim=0, keepdim=True)
-    cos_sim = (A_norm * V_norm).sum(dim=0)  # [V]
+    cos_sim = (A_norm * V_norm).sum(dim=0)
 
     return {
         "mean": cos_sim.mean().item(),
@@ -44,30 +33,13 @@ def feature_absorption_rate(
     W_vocab: Tensor,
     top_k: int = 10,
 ) -> dict[str, float]:
-    """Estimate feature absorption rate (per arXiv:2409.14507).
-
-    Checks if free decoder columns have high cosine similarity to vocabulary
-    directions, indicating absorption of vocabulary features into free stratum.
-
-    Args:
-        W_dec_A: [d, V] anchored decoder.
-        W_dec_B: [d, F-V] free decoder.
-        W_vocab: [d, V] vocabulary matrix.
-        top_k: Number of top alignments to report.
-
-    Returns:
-        Dict with absorption statistics.
-    """
-    # Normalize all column sets
+    """Estimate absorption of vocabulary directions into free decoder features."""
     B_norm = W_dec_B / W_dec_B.norm(dim=0, keepdim=True)
     V_norm = W_vocab / W_vocab.norm(dim=0, keepdim=True)
 
-    # Max cosine similarity of each free feature to any vocabulary direction
-    # [F-V, V] = B_norm^T @ V_norm
-    cos_matrix = B_norm.T @ V_norm  # [F-V, V]
-    max_cos_per_free = cos_matrix.abs().max(dim=1).values  # [F-V]
+    cos_matrix = B_norm.T @ V_norm
+    max_cos_per_free = cos_matrix.abs().max(dim=1).values
 
-    # Absorption: free features that are very aligned with vocabulary
     n_absorbed_099 = (max_cos_per_free > 0.99).sum().item()
     n_absorbed_095 = (max_cos_per_free > 0.95).sum().item()
     n_absorbed_090 = (max_cos_per_free > 0.90).sum().item()

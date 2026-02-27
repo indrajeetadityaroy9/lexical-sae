@@ -1,4 +1,4 @@
-"""Training metrics output via print statements."""
+"""Training metrics logging."""
 
 from __future__ import annotations
 
@@ -12,22 +12,18 @@ class StepMetrics:
     step: int = 0
     phase: int = 1
 
-    # Primary objective
     l0_mean: float = 0.0
     l0_corr: float = 0.0
     lagrangian: float = 0.0
 
-    # Constraint violations (raw per-batch)
     v_faith: float = 0.0
     v_drift: float = 0.0
     v_ortho: float = 0.0
 
-    # EMA-filtered violations
     v_fast_faith: float = 0.0
     v_fast_drift: float = 0.0
     v_fast_ortho: float = 0.0
 
-    # Control system state
     lambda_faith: float = 0.0
     lambda_drift: float = 0.0
     lambda_ortho: float = 0.0
@@ -36,20 +32,17 @@ class StepMetrics:
     rho_ortho: float = 0.0
     omega_o: float = 0.0
 
-    # Discretization
     lambda_disc: float = 0.0
     disc_correction: float = 0.0
 
-    # Reconstruction quality
     mse: float = 0.0
     r_squared: float = 0.0
 
-    # Phase 2 specific
     kl_div: float = 0.0
 
 
 class MetricsLogger:
-    """Prints training metrics at regular intervals."""
+    """Logs training metrics at regular intervals."""
 
     def __init__(self, log_interval: int = 100, **_kwargs) -> None:
         self.log_interval = log_interval

@@ -8,15 +8,7 @@ import random
 import numpy as np
 import torch
 
-# ---------------------------------------------------------------------------
-# Device — GPU required
-# ---------------------------------------------------------------------------
-
 DEVICE = torch.device("cuda")
-
-# ---------------------------------------------------------------------------
-# CUDA performance settings
-# ---------------------------------------------------------------------------
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -26,11 +18,6 @@ torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
 torch.backends.cuda.enable_math_sdp(False)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-
-# ---------------------------------------------------------------------------
-# Seeding
-# ---------------------------------------------------------------------------
 
 
 def set_seed(seed: int) -> None:

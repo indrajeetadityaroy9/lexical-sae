@@ -19,36 +19,17 @@ def compute_sparsity_frontier(
     multipliers: list[float] | None = None,
     n_batches: int = 20,
 ) -> list[dict[str, float]]:
-    """Sweep threshold multipliers to trace L0 vs CE Pareto curve.
-
-    For each multiplier m, temporarily scales all thresholds by m:
-        θ'_j = m · θ_j
-
-    Higher multipliers → sparser codes → higher CE loss.
-    The resulting (L0, CE_increase) pairs approximate the Pareto frontier.
-
-    Args:
-        sae: Trained StratifiedSAE.
-        whitener: Frozen whitener.
-        store: Activation store.
-        multipliers: Threshold multiplier values. Default: geometric sweep.
-        n_batches: Batches per multiplier.
-
-    Returns:
-        List of dicts with keys: multiplier, l0, ce_loss_increase, mse.
-    """
+    """Sweep threshold multipliers to trace the L0-vs-CE frontier."""
     if multipliers is None:
         multipliers = [0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 2.0, 3.0]
 
     device = next(sae.parameters()).device
 
-    # Save original thresholds
     orig_log_threshold = sae.jumprelu.log_threshold.data.clone()
 
     results = []
 
     for mult in multipliers:
-        # Scale thresholds
         sae.jumprelu.log_threshold.data = orig_log_threshold + torch.tensor(mult).log()
 
         total_l0 = 0.0
@@ -96,7 +77,6 @@ def compute_sparsity_frontier(
         results.append(point)
         print(f"Frontier m={point['multiplier']:.2f}: L0={point['l0']:.1f}, ΔCE={point['ce_loss_increase']:.4f}, MSE={point['mse']:.4f}")
 
-    # Restore original thresholds
     sae.jumprelu.log_threshold.data = orig_log_threshold
 
     return results

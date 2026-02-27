@@ -7,15 +7,7 @@ from torch import Tensor
 
 
 class DualRateEMA:
-    """Dual-rate EMA filter for constraint violations.
-
-    Two timescales:
-    - Fast (β=0.9, ~10-step smoothing): feeds ESO and proportional term.
-    - Slow (β=0.99, ~100-step smoothing): feeds integral accumulator.
-
-    Timescale separation ratio r = (1-β_fast)/(1-β_slow) = 10 satisfies
-    the minimum r ≥ 10 for two-timescale stochastic approximation convergence.
-    """
+    """Dual-rate EMA filter for constraint violations."""
 
     def __init__(
         self,
@@ -74,4 +66,3 @@ class DualRateEMA:
             "v_fast_prev": self._v_fast_prev,
             "initialized": self._initialized,
         }
-

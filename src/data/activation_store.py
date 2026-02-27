@@ -13,12 +13,7 @@ ModelType = HookedTransformer | AutoModelForCausalLM
 
 
 class ActivationStore:
-    """Streams residual-stream activations from a transformer model.
-
-    Hybrid approach:
-    - Uses TransformerLens HookedTransformer for supported models (Pythia, GPT-2).
-    - Uses manual PyTorch forward hooks for unsupported models (Llama-3-8B).
-    """
+    """Streams residual activations from TransformerLens or HuggingFace backends."""
 
     def __init__(
         self,
@@ -41,11 +36,9 @@ class ActivationStore:
         self._captured_activations: torch.Tensor | None = None
         self._token_iter: Iterator[torch.Tensor] | None = None
 
-        # Load model
         self.model = self._load_model()
         self.model.eval()
 
-        # Load tokenizer
         if self._use_transformerlens:
             self.tokenizer = self.model.tokenizer
         else:
@@ -65,7 +58,6 @@ class ActivationStore:
             print(f"Loaded {self.model_name} via TransformerLens")
             return model
         except ValueError:
-            # TransformerLens raises ValueError for unsupported model architectures
             pass
 
         print(f"TransformerLens does not support {self.model_name}, using HuggingFace hooks")
@@ -98,14 +90,15 @@ class ActivationStore:
         for part in parts:
             if part.isdigit():
                 return int(part)
+        raise ValueError(f"Unable to parse layer index from hook point: {self.hook_point}")
 
     def _resolve_hf_layer(self, model: AutoModelForCausalLM, layer_idx: int):
         """Resolve the transformer layer module for HuggingFace models."""
         for attr_path in [
-            f"model.layers.{layer_idx}",  # Llama, Mistral
-            f"gpt_neox.layers.{layer_idx}",  # Pythia
-            f"transformer.h.{layer_idx}",  # GPT-2
-            f"model.model.layers.{layer_idx}",  # Some wrapped models
+            f"model.layers.{layer_idx}",
+            f"gpt_neox.layers.{layer_idx}",
+            f"transformer.h.{layer_idx}",
+            f"model.model.layers.{layer_idx}",
         ]:
             module = model
             resolved = True
@@ -124,6 +117,7 @@ class ActivationStore:
             if resolved:
                 print(f"Resolved HF layer via {attr_path}")
                 return module
+        raise ValueError(f"Unable to resolve HuggingFace layer {layer_idx} for hook registration")
 
     def _token_generator(self) -> Iterator[torch.Tensor]:
         """Yield batches of token IDs from the dataset. Cycles indefinitely."""
@@ -149,11 +143,11 @@ class ActivationStore:
 
     @torch.no_grad()
     def next_batch(self) -> torch.Tensor:
-        """Get next batch of activations. Returns [N, d_model] flattened."""
+        """Return next activation batch flattened to [N, d_model]."""
         if self._token_iter is None:
             self._token_iter = self._token_generator()
 
-        tokens = next(self._token_iter).to(self.device)  # [batch, seq_len]
+        tokens = next(self._token_iter).to(self.device)
 
         if self._use_transformerlens:
             _, cache = self.model.run_with_cache(
@@ -161,12 +155,11 @@ class ActivationStore:
                 names_filter=self.hook_point,
                 stop_at_layer=self._parse_layer_index() + 1,
             )
-            acts = cache[self.hook_point]  # [batch, seq_len, d_model]
+            acts = cache[self.hook_point]
         else:
             self.model(tokens)
-            acts = self._captured_activations  # [batch, seq_len, d_model]
+            acts = self._captured_activations
 
-        # Flatten to [batch * seq_len, d_model]
         return acts.reshape(-1, acts.shape[-1]).float()
 
     def get_unembedding_matrix(self) -> torch.Tensor:
@@ -175,7 +168,7 @@ class ActivationStore:
             return self.model.W_U.float()
         else:
             lm_head = self.model.get_output_embeddings()
-            return lm_head.weight.T.float()  # [d_model, V]
+            return lm_head.weight.T.float()
 
     def get_model(self) -> ModelType:
         """Return the underlying model (for Phase 2 KL computation)."""
@@ -187,4 +180,3 @@ class ActivationStore:
             return self.model.cfg.d_model
         else:
             return self.model.config.hidden_size
-

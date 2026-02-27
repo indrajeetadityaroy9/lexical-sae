@@ -14,37 +14,26 @@ if TYPE_CHECKING:
 
 @dataclass
 class SPALFConfig:
-    """SPALF experiment configuration.
+    """Experiment configuration."""
 
-    Contains only research-relevant parameters that vary between experiments.
-    Fixed structural constants live in src.constants.
-    Derived values (tau thresholds, d, V) are computed during calibration
-    and returned via CalibrationResult, not stored here.
-    """
-
-    # Model
     model_name: str = "EleutherAI/pythia-1.4b"
     hook_point: str = "blocks.6.hook_resid_post"
 
-    # Data
     dataset: str = "monology/pile-uncopyrighted"
     total_tokens: int = 1_000_000_000
     batch_size: int = 4096
     seq_len: int = 128
 
-    # SAE
-    F: int = 0  # 0 = auto (32 * d_model)
-    L0_target: int | None = None  # None = auto (ceil(F / 400))
+    F: int = 0
+    L0_target: int | None = None
     R2_target: float = 0.97
     V_cap: int | None = None
     lr: float = 3e-4
 
-    # Run
     seed: int = 42
     output_dir: str = "runs/default"
 
-    # Eval
-    checkpoint: str = ""  # path to checkpoint dir (eval only)
+    checkpoint: str = ""
     eval_suites: list[str] = field(
         default_factory=lambda: [
             "downstream_loss",
@@ -93,11 +82,7 @@ class SPALFConfig:
 
 @dataclass
 class CalibrationResult:
-    """Outputs of the calibration phase, passed through training.
-
-    Computed once during calibration, consumed by training loops and
-    checkpoint serialization. Never stored in config.
-    """
+    """Calibration outputs shared across training and checkpointing."""
 
     whitener: object  # SoftZCAWhitener (avoid circular import)
     W_vocab: Tensor  # [d, V]

@@ -1,4 +1,4 @@
-"""Phase 2 training loop: end-to-end causal calibration (section 7.5)."""
+"""Phase 2 training loop."""
 
 from __future__ import annotations
 
@@ -44,11 +44,7 @@ def run_phase2(
     metrics_logger: MetricsLogger,
     start_step: int,
 ) -> None:
-    """Phase 2 end-to-end causal calibration (section 7.5).
-
-    Replaces Phase 1 faithfulness constraint with MSE/KL blend.
-    CAPU rho is frozen to prevent transient penalty spikes from the new KL signal.
-    """
+    """Run Phase 2 with KL-aware faithfulness."""
     device = W_vocab.device
     total_steps = config.total_tokens // config.batch_size
 
@@ -63,10 +59,8 @@ def run_phase2(
     print(f"Starting Phase 2 at step {start_step}: remaining {total_steps - start_step} steps")
 
     for step in range(start_step, total_steps):
-        # === Get tokens for KL computation ===
         tokens = next(token_iter).to(device)
 
-        # === KL divergence computation ===
         orig_logits, patched_logits, _, _, _, _ = run_patched_forward(
             store, sae, whitener, tokens
         )
@@ -77,33 +71,27 @@ def run_phase2(
         with torch.no_grad():
             kl_running_mean = kl_beta * kl_running_mean + (1 - kl_beta) * kl_div
 
-        # === Get activations from buffer for SAE training ===
         x = buffer.next_batch(config.batch_size).to(device)
         x_tilde = whitener.forward(x)
         lambda_disc = disc_schedule.get_lambda(step)
         x_hat, z, gate_mask, l0_probs, disc_raw = sae.forward_fused(x_tilde, lambda_disc)
 
-        # === Compute Phase 2 faithfulness (MSE/KL blend) ===
         v_faith = compute_faithfulness_violation_phase2(
             x, x_hat, kl_div, tau_faith, kl_running_mean
         )
 
-        # === Drift and orthogonality unchanged ===
         v_drift = compute_drift_violation(sae.W_dec_A, W_vocab, tau_drift)
         v_ortho = compute_orthogonality_violation(
             z, sae.W_dec_A, sae.W_dec_B, tau_ortho
         )
         violations = torch.stack([v_faith, v_drift, v_ortho])
 
-        # === EMA update ===
         ema.update(violations)
 
-        # === L0 loss + discretization ===
         disc_correction = disc_raw.mean()
         l0_loss = l0_probs.mean()
         l0_corr = l0_loss + disc_correction
 
-        # === Augmented Lagrangian ===
         lagrangian = compute_augmented_lagrangian(
             l0_corr=l0_corr,
             v_fast=ema.v_fast,
@@ -111,22 +99,17 @@ def run_phase2(
             rhos=capu.rhos,
         )
 
-        # === Adam step ===
         optimizer.zero_grad()
         lagrangian.backward()
         optimizer.step()
 
-        # === ADRC dual update ===
         adrc.step(ema.v_fast, ema.v_fast_prev, ema.v_slow)
 
-        # === omega_o update only (CAPU is frozen) ===
         if step % SLOW_UPDATE_INTERVAL == 0 and step > start_step:
             adrc.update_omega(ema.v_fast, ema.v_fast_prev)
 
-        # === Normalize free decoder ===
         sae.normalize_free_decoder()
 
-        # === Logging ===
         with torch.no_grad():
             l0_mean = gate_mask.sum(dim=1).mean().item()
             mse = (x - x_hat).pow(2).sum(dim=1).mean().item()

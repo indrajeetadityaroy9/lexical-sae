@@ -17,24 +17,7 @@ def run_patched_forward(
     whitener: SoftZCAWhitener,
     tokens: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Run original + SAE-patched forward passes through the transformer.
-
-    Handles both TransformerLens and HuggingFace backends.
-
-    Args:
-        store: Activation store (provides model, hook point, backend dispatch).
-        sae: Trained StratifiedSAE.
-        whitener: Frozen whitener.
-        tokens: [B, S] input token ids.
-
-    Returns:
-        orig_logits: [B, S, vocab] original model logits.
-        patched_logits: [B, S, vocab] SAE-patched model logits.
-        x_flat: [B*S, d] raw activations (flattened).
-        x_hat_flat: [B*S, d] SAE reconstruction (flattened).
-        z: [B*S, F] sparse codes.
-        gate_mask: [B*S, F] binary activation mask.
-    """
+    """Run original and SAE-patched forwards and return logits plus SAE intermediates."""
     model = store.get_model()
 
     if store._use_transformerlens:
@@ -52,7 +35,7 @@ def _patched_forward_tl(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """TransformerLens: run_with_cache → SAE → run_with_hooks."""
     orig_logits, cache = model.run_with_cache(tokens, names_filter=hook_point)
-    x_raw = cache[hook_point]  # [B, S, d]
+    x_raw = cache[hook_point]
     B, S, d = x_raw.shape
 
     x_flat = x_raw.reshape(-1, d).float()
@@ -80,7 +63,7 @@ def _patched_forward_hf(
     """HuggingFace: forward → SAE → hook manipulation → forward."""
     orig_outputs = model(tokens)
     orig_logits = orig_outputs.logits
-    x_raw = store._captured_activations  # [B, S, d]
+    x_raw = store._captured_activations
     B, S, d = x_raw.shape
 
     x_flat = x_raw.reshape(-1, d).float()
@@ -88,7 +71,6 @@ def _patched_forward_hf(
     x_hat_flat, z, gate_mask, _ = sae(x_tilde)
     x_hat = x_hat_flat.reshape(B, S, d).to(x_raw.dtype)
 
-    # Temporarily replace capture hook with injection hook
     original_hook = store._hook_handle
     original_hook.remove()
     layer_idx = store._parse_layer_index()
@@ -109,7 +91,6 @@ def _patched_forward_hf(
     patched_logits = patched_outputs.logits
     handle.remove()
 
-    # Restore capture hook
     store._register_hf_hook(model)
 
     return orig_logits, patched_logits, x_flat, x_hat_flat, z, gate_mask

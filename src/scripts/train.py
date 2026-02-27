@@ -19,8 +19,6 @@ def main() -> None:
     trainer = SPALFTrainer(config)
     trainer.train()
 
-    print(f"Training complete. Outputs saved to {config.output_dir}")
-
 
 if __name__ == "__main__":
     main()

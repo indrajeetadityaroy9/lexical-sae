@@ -29,22 +29,12 @@ def save_checkpoint(
     step: int,
     phase: int,
 ) -> Path:
-    """Save training checkpoint as a directory of safetensors + metadata JSON.
-
-    Structure:
-        model.safetensors     — SAE nn.Module weights
-        tensors.safetensors   — whitener tensors + W_vocab
-        control.safetensors   — ADRC/CAPU/EMA tensors
-        optimizer.safetensors — optimizer state tensors
-        metadata.json         — scalars, config, calibration
-    """
+    """Save checkpoint as safetensors files plus metadata."""
     ckpt_dir = Path(config.output_dir) / f"spalf_phase{phase}_step{step}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. SAE weights
     save_model(sae, str(ckpt_dir / "model.safetensors"))
 
-    # 2. Whitener tensors + W_vocab
     w_sd = cal.whitener.state_dict()
     save_file(
         {
@@ -56,12 +46,11 @@ def save_checkpoint(
         str(ckpt_dir / "tensors.safetensors"),
     )
 
-    # 3. Control tensors (flat keys)
     control_tensors = {}
     for k, v in adrc.state_dict().items():
         if isinstance(v, Tensor):
             control_tensors[f"adrc.{k}"] = v
-        elif isinstance(v, dict):  # ESO nested dict
+        elif isinstance(v, dict):
             for ek, ev in v.items():
                 if isinstance(ev, Tensor):
                     control_tensors[f"adrc.eso.{ek}"] = ev
@@ -73,7 +62,6 @@ def save_checkpoint(
             control_tensors[f"ema.{k}"] = v
     save_file(control_tensors, str(ckpt_dir / "control.safetensors"))
 
-    # 4. Optimizer state tensors
     opt_sd = optimizer.state_dict()
     opt_tensors = {}
     for pid, state in opt_sd["state"].items():
@@ -82,7 +70,6 @@ def save_checkpoint(
                 opt_tensors[f"state.{pid}.{k}"] = v
     save_file(opt_tensors, str(ckpt_dir / "optimizer.safetensors"))
 
-    # 5. Metadata JSON (all non-tensor data)
     metadata = {
         "step": step,
         "phase": phase,
@@ -115,29 +102,20 @@ def save_checkpoint(
 def load_checkpoint(
     checkpoint_path: str | Path,
 ) -> tuple[StratifiedSAE, SoftZCAWhitener, Tensor]:
-    """Load SAE, whitener, and W_vocab from a safetensors checkpoint directory.
-
-    Returns:
-        sae: Trained StratifiedSAE in eval mode.
-        whitener: Frozen SoftZCAWhitener.
-        W_vocab: [d, V] unembedding matrix.
-    """
+    """Load SAE, whitener, and vocabulary matrix from a checkpoint."""
     ckpt_dir = Path(checkpoint_path)
 
-    # 1. Load metadata
     with open(ckpt_dir / "metadata.json") as f:
         metadata = json.load(f)
 
     cal_data = metadata["calibration"]
     w_meta = metadata["whitener"]
 
-    # 2. Reconstruct SAE and load weights
     sae = StratifiedSAE(d=cal_data["d"], F=cal_data["F"], V=cal_data["V"])
     load_model(sae, str(ckpt_dir / "model.safetensors"))
     sae.to(DEVICE)
     sae.eval()
 
-    # 3. Load whitener tensors and reconstruct
     tensors = load_file(str(ckpt_dir / "tensors.safetensors"), device=str(DEVICE))
     whitener = SoftZCAWhitener(
         mean=tensors["mean"],

@@ -1,11 +1,10 @@
-"""Calibration phase: covariance estimation, whitening, SAE initialization (sections 7.1-7.2)."""
+"""Calibration routines."""
 
 from __future__ import annotations
 
 import math
 
 import torch
-from torch import Tensor
 
 from src.config import CalibrationResult, SPALFConfig
 from src.constants import C_EPSILON, C_ORTHO, DELTA_COV, DELTA_DRIFT, DELTA_RANK, KAPPA_TARGET
@@ -20,29 +19,18 @@ def run_calibration(
     config: SPALFConfig,
     store: ActivationStore,
 ) -> CalibrationResult:
-    """Calibration phase (section 7.1): stream, covariance, eigendecompose, whitener, init SAE.
-
-    Returns a CalibrationResult containing the whitener, W_vocab, SAE dimensions,
-    and computed constraint thresholds.
-    """
+    """Build covariance, whitener, vocabulary slice, and constraint thresholds."""
     d = store.d_model
     print(f"Starting calibration phase: d={d}")
 
-    # Auto-compute F and L0_target from d_model
     F = config.F if config.F > 0 else 32 * d
     L0_target = config.L0_target if config.L0_target is not None else math.ceil(F / 400)
 
-    # Online covariance estimation
     cov = OnlineCovariance(d, delta_cov=DELTA_COV)
 
-    step = 0
     while not cov.has_converged():
         batch = store.next_batch()
         cov.update(batch.cpu())
-        step += 1
-
-        if step % 100 == 0:
-            print(f"Calibration step {step}: {cov.n_samples} samples accumulated")
 
         if cov.n_samples > 50_000_000:
             print("Covariance not converged after 50M samples, proceeding anyway")
@@ -50,7 +38,6 @@ def run_calibration(
 
     print(f"Covariance converged after {cov.n_samples} samples (or limit reached)")
 
-    # Build whitener
     whitener = SoftZCAWhitener.from_covariance(
         cov,
         kappa_target=KAPPA_TARGET,
@@ -58,7 +45,6 @@ def run_calibration(
     )
     whitener = whitener.to(store.device)
 
-    # Get and cap vocabulary
     W_vocab_full = store.get_unembedding_matrix()
     if config.V_cap is not None and config.V_cap < W_vocab_full.shape[1]:
         norms = W_vocab_full.norm(dim=0)
@@ -71,7 +57,6 @@ def run_calibration(
 
     V = W_vocab.shape[1]
 
-    # Compute constraint thresholds (section 8.3)
     tau_faith = (1.0 - config.R2_target) * d
     tau_drift = DELTA_DRIFT**2 * W_vocab.pow(2).sum().item()
     tau_ortho = C_ORTHO / d
@@ -98,12 +83,11 @@ def initialize_from_calibration(
     cal: CalibrationResult,
     store: ActivationStore,
 ) -> StratifiedSAE:
-    """Create and initialize the SAE using calibration results (section 7.2)."""
+    """Create and initialize the SAE from calibration outputs."""
     device = cal.W_vocab.device
 
     sae = StratifiedSAE(cal.d, cal.F, cal.V).to(device)
 
-    print("Collecting activation sample for threshold calibration...")
     samples = []
     n_needed = min(50_000, store.batch_size * 20)
     while sum(s.shape[0] for s in samples) < n_needed:
