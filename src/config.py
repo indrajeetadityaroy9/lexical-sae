@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,23 +46,7 @@ class SPALFConfig:
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
-        return {
-            "model_name": self.model_name,
-            "hook_point": self.hook_point,
-            "dataset": self.dataset,
-            "total_tokens": self.total_tokens,
-            "batch_size": self.batch_size,
-            "seq_len": self.seq_len,
-            "F": self.F,
-            "L0_target": self.L0_target,
-            "R2_target": self.R2_target,
-            "V_cap": self.V_cap,
-            "lr": self.lr,
-            "seed": self.seed,
-            "output_dir": self.output_dir,
-            "checkpoint": self.checkpoint,
-            "eval_suites": list(self.eval_suites),
-        }
+        return dataclasses.asdict(self)
 
     def save(self, path: str | Path) -> None:
         """Save config to YAML."""

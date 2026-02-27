@@ -8,6 +8,7 @@ import random
 import numpy as np
 import torch
 
+assert torch.cuda.is_available(), "SPALF requires CUDA"
 DEVICE = torch.device("cuda")
 
 torch.backends.cuda.matmul.allow_tf32 = True

@@ -1,4 +1,4 @@
-"""Fused JumpReLU Triton kernels."""
+"""Fused JumpReLU Triton kernels with Moreau envelope STE."""
 
 from __future__ import annotations
 
@@ -45,18 +45,22 @@ def _fused_jumprelu_fwd_kernel(
 
 
 @triton.jit
-def _rectangle_ste_bwd_kernel(
+def _moreau_ste_bwd_kernel(
     grad_l0_ptr,
     pre_act_ptr,
     theta_ptr,
-    epsilon_ptr,
+    gamma_ptr,
     grad_pre_act_ptr,
     grad_theta_ptr,
     n_elements,
     F: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Backward for L0: Rectangle STE gradient routing."""
+    """Backward for L0: Moreau envelope proximal gradient of Heaviside.
+
+    Transition zone: -sqrt(2*gamma) < u <= 0 where u = x - theta.
+    Gradient in zone: -u / gamma (linear ramp).
+    """
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
@@ -66,15 +70,17 @@ def _rectangle_ste_bwd_kernel(
 
     feat_idx = offsets % F
     theta = tl.load(theta_ptr + feat_idx, mask=mask, other=0.0)
-    eps = tl.load(epsilon_ptr + feat_idx, mask=mask, other=1.0)
+    gamma = tl.load(gamma_ptr + feat_idx, mask=mask, other=1.0)
 
-    u = (x - theta) / eps
+    u = x - theta
+    bandwidth = tl.sqrt(2.0 * gamma)
 
-    rect = (tl.abs(u) < 1.0).to(tl.float32)
+    # Transition zone: -bandwidth < u <= 0
+    in_zone = (u > -bandwidth) & (u <= 0.0)
+    moreau_grad = tl.where(in_zone, -u / gamma, 0.0)
 
-    grad_x = grad_l0 * rect / eps
-
-    grad_t = -grad_l0 * rect / eps
+    grad_x = grad_l0 * moreau_grad
+    grad_t = -grad_l0 * moreau_grad  # threshold gradient = negative of activation gradient
 
     tl.store(grad_pre_act_ptr + offsets, grad_x, mask=mask)
     tl.atomic_add(grad_theta_ptr + feat_idx, grad_t, mask=mask)
@@ -88,7 +94,7 @@ class FusedJumpReLUFunction(torch.autograd.Function):
         ctx,
         pre_act: Tensor,
         log_threshold: Tensor,
-        epsilon: Tensor,
+        gamma: Tensor,
         lambda_disc: float,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Fused forward: returns (z, gate, l0, disc_correction)."""
@@ -114,7 +120,7 @@ class FusedJumpReLUFunction(torch.autograd.Function):
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
-        ctx.save_for_backward(pre_act, theta, epsilon)
+        ctx.save_for_backward(pre_act, theta, gamma)
         ctx.F = F
         ctx.n_elements = n_elements
 
@@ -124,7 +130,7 @@ class FusedJumpReLUFunction(torch.autograd.Function):
     def backward(
         ctx, grad_z: Tensor, grad_gate: Tensor, grad_l0: Tensor, grad_disc: Tensor
     ) -> tuple[Tensor | None, Tensor | None, None, None]:
-        pre_act, theta, epsilon = ctx.saved_tensors
+        pre_act, theta, gamma = ctx.saved_tensors
         F = ctx.F
         n_elements = ctx.n_elements
 
@@ -137,8 +143,8 @@ class FusedJumpReLUFunction(torch.autograd.Function):
         BLOCK_SIZE = 1024
         grid = ((n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)
 
-        _rectangle_ste_bwd_kernel[grid](
-            grad_l0, pre_act, theta, epsilon,
+        _moreau_ste_bwd_kernel[grid](
+            grad_l0, pre_act, theta, gamma,
             grad_pre_act_from_l0, grad_theta_from_l0,
             n_elements, F=F, BLOCK_SIZE=BLOCK_SIZE,
         )

@@ -58,7 +58,7 @@ class ActivationBuffer:
             self._fill_buffer()
 
         indices = torch.randint(0, self.buffer_size, (batch_size,))
-        batch = self._buffer[indices].clone()
+        batch = self._buffer[indices]
         self._total_tokens_served += batch_size
 
         if self._total_tokens_served % self.buffer_size < batch_size:

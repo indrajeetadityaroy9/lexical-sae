@@ -52,12 +52,7 @@ def initialize_sae(
                 row = W_enc_B[i]
                 proj = Q @ (Q.T @ row)
                 row = row - proj
-                norm = row.norm()
-                if norm > 1e-8:
-                    W_enc_B[i] = row / norm
-                else:
-                    W_enc_B[i] = torch.randn(d, device=device)
-                    W_enc_B[i] /= W_enc_B[i].norm()
+                W_enc_B[i] = row / row.norm()
 
         for i in range(n_orthogonal, F_free):
             W_enc_B[i] /= W_enc_B[i].norm()
@@ -88,7 +83,7 @@ def _calibrate_thresholds(
     thresholds = torch.quantile(pre_act, quantile, dim=0)
     sae.jumprelu.log_threshold.data = thresholds.log()
 
-    epsilons = torch.zeros(F, device=device)
+    gammas = torch.zeros(F, device=device)
 
     for j in range(F):
         col = pre_act[:, j]
@@ -99,17 +94,11 @@ def _calibrate_thresholds(
         mask = (col > theta_j - window) & (col < theta_j + window)
         near_threshold = col[mask]
 
-        if near_threshold.numel() >= 10:
-            q75 = torch.quantile(near_threshold, 0.75)
-            q25 = torch.quantile(near_threshold, 0.25)
-            iqr = q75 - q25
-        else:
-            q75 = torch.quantile(col, 0.75)
-            q25 = torch.quantile(col, 0.25)
-            iqr = q75 - q25
+        iqr = torch.quantile(near_threshold, 0.75) - torch.quantile(near_threshold, 0.25)
 
-        epsilons[j] = c_epsilon * iqr
+        # gamma_j = (c_epsilon * IQR_j)^2 / 2  (Moreau envelope bandwidth)
+        gammas[j] = (c_epsilon * iqr) ** 2 / 2.0
 
-    sae.jumprelu.epsilon.copy_(epsilons)
+    sae.jumprelu.gamma.copy_(gammas)
 
-    print(f"Thresholds calibrated: median_θ={thresholds.median().item():.4f}, median_ε={epsilons.median().item():.6f}")
+    print(f"Thresholds calibrated: median_θ={thresholds.median().item():.4f}, median_γ={gammas.median().item():.6f}")

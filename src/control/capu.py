@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from src.runtime import DEVICE
+
 
 class ModifiedCAPU:
     """Non-monotone per-constraint adaptive penalty controller."""
@@ -16,7 +18,6 @@ class ModifiedCAPU:
         rho_0: float = 1.0,
         beta_slow: float = 0.99,
         eps_num: float = 1e-8,
-        device: torch.device = torch.device("cuda"),
     ) -> None:
         self.n_constraints = initial_violations.shape[0]
         self.beta_slow = beta_slow
@@ -25,12 +26,12 @@ class ModifiedCAPU:
         self._frozen = False
 
         self._etas = (
-            c_eta / (initial_violations.abs().to(device) + eps_num).sqrt()
+            c_eta / (initial_violations.abs().to(DEVICE) + eps_num).sqrt()
         )
 
-        self._v_bar = torch.ones(self.n_constraints, device=device)
+        self._v_bar = torch.ones(self.n_constraints, device=DEVICE)
 
-        self._rhos = torch.full((self.n_constraints,), rho_0, device=device)
+        self._rhos = torch.full((self.n_constraints,), rho_0, device=DEVICE)
 
     def step(self, v_fast: Tensor) -> None:
         """Update penalty coefficients from fast EMA violations."""
@@ -59,6 +60,4 @@ class ModifiedCAPU:
             "etas": self._etas,
             "v_bar": self._v_bar,
             "rhos": self._rhos,
-            "frozen": self._frozen,
-            "rho_min": self.rho_min,
         }

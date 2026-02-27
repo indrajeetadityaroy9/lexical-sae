@@ -17,23 +17,14 @@ from src.evaluation import (
     drift_fidelity,
     feature_absorption_rate,
 )
-from src.model.sae import StratifiedSAE
-from src.runtime import DEVICE, set_seed
-from src.whitening.whitener import SoftZCAWhitener
-
-
-def load_from_checkpoint(
-    config: SPALFConfig,
-) -> tuple[StratifiedSAE, SoftZCAWhitener, torch.Tensor]:
-    """Load SAE, whitener, and W_vocab from a safetensors checkpoint directory."""
-    return load_checkpoint(config.checkpoint)
+from src.runtime import set_seed
 
 
 def run_eval(config: SPALFConfig) -> dict:
     """Run requested evaluation suites."""
     set_seed(config.seed)
 
-    sae, whitener, W_vocab = load_from_checkpoint(config)
+    sae, whitener, W_vocab = load_checkpoint(config.checkpoint)
     suites = config.eval_suites
     results = {}
 
@@ -47,7 +38,6 @@ def run_eval(config: SPALFConfig) -> dict:
             dataset_name=config.dataset,
             batch_size=config.batch_size,
             seq_len=config.seq_len,
-            device=DEVICE,
         )
 
     if "downstream_loss" in suites:

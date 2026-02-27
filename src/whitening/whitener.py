@@ -193,12 +193,3 @@ class SoftZCAWhitener:
             "d": self.d,
         }
 
-    @classmethod
-    def from_state_dict(cls, d: dict) -> SoftZCAWhitener:
-        """Reconstruct whitener from checkpoint state dict."""
-        return cls(
-            mean=d["mean"],
-            eigenvalues=d["eigenvalues"],
-            eigenvectors=d["eigenvectors"],
-            kappa_target=d["kappa_target"],
-        )

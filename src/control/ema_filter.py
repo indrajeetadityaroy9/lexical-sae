@@ -5,25 +5,26 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from src.runtime import DEVICE
+
 
 class DualRateEMA:
-    """Dual-rate EMA filter for constraint violations."""
+    """Dual-rate EMA filter with Adam-style bias correction for constraint violations."""
 
     def __init__(
         self,
         n_constraints: int = 3,
         beta_fast: float = 0.9,
         beta_slow: float = 0.99,
-        device: torch.device = torch.device("cuda"),
     ) -> None:
         self.n_constraints = n_constraints
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
 
-        self._v_fast = torch.zeros(n_constraints, device=device)
-        self._v_slow = torch.zeros(n_constraints, device=device)
-        self._v_fast_prev = torch.zeros(n_constraints, device=device)
-        self._initialized = False
+        self._v_fast_raw = torch.zeros(n_constraints, device=DEVICE)
+        self._v_slow_raw = torch.zeros(n_constraints, device=DEVICE)
+        self._v_fast_prev = torch.zeros(n_constraints, device=DEVICE)
+        self._n_updates = 0
 
     def update(self, violations: Tensor) -> None:
         """Update both EMA channels with raw constraint violations.
@@ -33,36 +34,41 @@ class DualRateEMA:
         """
         v = violations.detach()
 
-        if not self._initialized:
-            self._v_fast = v.clone()
-            self._v_slow = v.clone()
-            self._v_fast_prev = v.clone()
-            self._initialized = True
-            return
+        # Store bias-corrected current as prev BEFORE updating
+        if self._n_updates > 0:
+            self._v_fast_prev = self.v_fast.clone()
 
-        self._v_fast_prev = self._v_fast.clone()
-        self._v_fast = self.beta_fast * self._v_fast + (1 - self.beta_fast) * v
-        self._v_slow = self.beta_slow * self._v_slow + (1 - self.beta_slow) * v
+        self._n_updates += 1
+        self._v_fast_raw = self.beta_fast * self._v_fast_raw + (1 - self.beta_fast) * v
+        self._v_slow_raw = self.beta_slow * self._v_slow_raw + (1 - self.beta_slow) * v
+
+        # On first update, set prev to current (no delta)
+        if self._n_updates == 1:
+            self._v_fast_prev = self.v_fast.clone()
 
     @property
     def v_fast(self) -> Tensor:
-        """Fast EMA of violations [n_constraints]."""
-        return self._v_fast
+        """Bias-corrected fast EMA of violations [n_constraints]."""
+        if self._n_updates == 0:
+            return self._v_fast_raw
+        return self._v_fast_raw / (1 - self.beta_fast ** self._n_updates)
 
     @property
     def v_slow(self) -> Tensor:
-        """Slow EMA of violations [n_constraints]."""
-        return self._v_slow
+        """Bias-corrected slow EMA of violations [n_constraints]."""
+        if self._n_updates == 0:
+            return self._v_slow_raw
+        return self._v_slow_raw / (1 - self.beta_slow ** self._n_updates)
 
     @property
     def v_fast_prev(self) -> Tensor:
-        """Previous step's fast EMA [n_constraints]."""
+        """Previous step's bias-corrected fast EMA [n_constraints]."""
         return self._v_fast_prev
 
     def state_dict(self) -> dict:
         return {
-            "v_fast": self._v_fast,
-            "v_slow": self._v_slow,
+            "v_fast_raw": self._v_fast_raw,
+            "v_slow_raw": self._v_slow_raw,
             "v_fast_prev": self._v_fast_prev,
-            "initialized": self._initialized,
+            "n_updates": self._n_updates,
         }

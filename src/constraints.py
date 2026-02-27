@@ -62,13 +62,48 @@ def compute_drift_violation(
     return (W_dec_A - W_vocab).pow(2).sum() - tau_drift
 
 
+def compute_frame_energy(W_dec_B: Tensor, d: int) -> Tensor:
+    """Frame energy: deviation of free decoder from tight frame structure.
+
+    R_frame = || W_B W_B^T / trace(W_B W_B^T) - (1/d) I_d ||_F^2
+
+    Equals zero when W_dec_B forms a tight frame (all eigenvalues of the
+    normalized frame operator equal 1/d). From spectral superposition theory
+    (arXiv:2602.02224, Thm 3).
+    """
+    frame_op = W_dec_B @ W_dec_B.T  # [d, d]
+    frame_op_normalized = frame_op / frame_op.diagonal().sum()
+    target = torch.eye(d, device=W_dec_B.device) / d
+    return (frame_op_normalized - target).pow(2).sum()
+
+
 def compute_orthogonality_violation(
     z: Tensor,
     W_dec_A: Tensor,
     W_dec_B: Tensor,
     tau_ortho: float,
 ) -> Tensor:
-    """Co-activation orthogonality violation from Triton kernel output."""
-    from src.kernels.ortho_kernel import compute_ortho_triton
+    """Differentiable co-activation orthogonality violation (replaces Triton kernel).
 
-    return compute_ortho_triton(z, W_dec_A, W_dec_B, tau_ortho)
+    Computes mean pairwise cos² between active decoder columns, fully differentiable
+    through z (gate activations) and W_dec columns.
+    """
+    W_dec = torch.cat([W_dec_A, W_dec_B], dim=1)  # [d, F]
+    col_norms = W_dec.norm(dim=0, keepdim=True)
+    W_hat = W_dec / col_norms  # [d, F]
+
+    # Gram matrix of normalized columns: G[i,j] = cos(angle(d_i, d_j))
+    G = W_hat.T @ W_hat  # [F, F]
+    G_sq = G.pow(2)
+
+    # Weight by co-activation: soft gates from z
+    active = (z > 0).float()  # [B, F]
+    # Pairwise co-activation counts: C[i,j] = sum_b active[b,i] * active[b,j]
+    C = active.T @ active  # [F, F]
+
+    # Subtract diagonal (self-pairs) instead of allocating F×F identity mask
+    weighted = G_sq * C
+    numerator = weighted.sum() - weighted.diagonal().sum()
+    denominator = C.sum() - C.diagonal().sum()
+
+    return numerator / denominator - tau_ortho

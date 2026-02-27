@@ -31,7 +31,6 @@ def feature_absorption_rate(
     W_dec_A: Tensor,
     W_dec_B: Tensor,
     W_vocab: Tensor,
-    top_k: int = 10,
 ) -> dict[str, float]:
     """Estimate absorption of vocabulary directions into free decoder features."""
     B_norm = W_dec_B / W_dec_B.norm(dim=0, keepdim=True)

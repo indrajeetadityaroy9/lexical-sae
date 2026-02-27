@@ -6,15 +6,14 @@ import torch
 
 from src.config import CalibrationResult, SPALFConfig
 from src.constants import (
-    BETA_FAST,
     BETA_SLOW,
     C_ETA,
+    C_FRAME,
     EPS_NUM,
     LAMBDA_DISC_MAX,
     LOG_INTERVAL,
     OMEGA_O_INIT,
     RHO_0,
-    S_DISC,
 )
 from src.control.adrc import ADRCController
 from src.control.capu import ModifiedCAPU
@@ -25,30 +24,8 @@ from src.model.sae import StratifiedSAE
 from src.runtime import DEVICE, set_seed
 from src.training.calibration import initialize_from_calibration, run_calibration
 from src.training.logging import MetricsLogger
-from src.training.phase1 import run_phase1
-from src.training.phase2 import run_phase2
+from src.training.loop import DiscretizationSchedule, run_training_loop
 from src.whitening.whitener import SoftZCAWhitener
-
-
-class DiscretizationSchedule:
-    """Piecewise-linear discretization weight schedule."""
-
-    def __init__(
-        self,
-        T_total: int,
-        s_disc: float = 0.8,
-        lambda_max: float = 1.0,
-    ) -> None:
-        self.T_total = T_total
-        self.s_disc = s_disc
-        self.lambda_max = lambda_max
-
-    def get_lambda(self, step: int) -> float:
-        """Return the discretization penalty at step."""
-        r = step / self.T_total
-        if r <= self.s_disc:
-            return 0.0
-        return self.lambda_max * (r - self.s_disc) / (1.0 - self.s_disc)
 
 
 class SPALFTrainer:
@@ -56,7 +33,6 @@ class SPALFTrainer:
 
     def __init__(self, config: SPALFConfig) -> None:
         self.config = config
-        self.device = DEVICE
 
     def train(self) -> StratifiedSAE:
         """Run full training pipeline."""
@@ -70,7 +46,6 @@ class SPALFTrainer:
             dataset_name=config.dataset,
             batch_size=config.batch_size,
             seq_len=config.seq_len,
-            device=self.device,
         )
 
         buffer = ActivationBuffer(store, buffer_size=2**20)
@@ -81,8 +56,16 @@ class SPALFTrainer:
 
         print("Initializing StratifiedSAE...")
         sae = initialize_from_calibration(cal, store)
-        sae = sae.to(self.device)
+        sae = sae.to(DEVICE)
+        sae = torch.compile(sae, mode="max-autotune")
         print(f"SAE initialized: d={sae.d}, F={sae.F}, V={sae.V}, F_free={sae.F_free}")
+
+        lambda_frame = C_FRAME / sae.d
+
+        # Derive constants from BETA_SLOW (two-timescale theory)
+        beta_fast = 1.0 - 10.0 * (1.0 - BETA_SLOW)
+        slow_update_interval = round(1.0 / (1.0 - BETA_SLOW))
+        phase_transition_patience = slow_update_interval
 
         initial_violations = self._measure_initial_violations(
             sae, cal.whitener, cal.W_vocab, buffer, cal, config.batch_size
@@ -91,15 +74,14 @@ class SPALFTrainer:
 
         ema = DualRateEMA(
             n_constraints=3,
-            beta_fast=BETA_FAST,
+            beta_fast=beta_fast,
             beta_slow=BETA_SLOW,
-            device=self.device,
         )
 
         adrc = ADRCController(
             n_constraints=3,
             omega_o_init=OMEGA_O_INIT,
-            device=self.device,
+            beta_fast=beta_fast,
         )
 
         capu = ModifiedCAPU(
@@ -108,13 +90,11 @@ class SPALFTrainer:
             rho_0=RHO_0,
             beta_slow=BETA_SLOW,
             eps_num=EPS_NUM,
-            device=self.device,
         )
 
         total_steps = config.total_tokens // config.batch_size
         disc_schedule = DiscretizationSchedule(
             T_total=total_steps,
-            s_disc=S_DISC,
             lambda_max=LAMBDA_DISC_MAX,
         )
 
@@ -126,7 +106,8 @@ class SPALFTrainer:
         )
 
         print("Starting Phase 1 training...")
-        phase1_end_step = run_phase1(
+        phase1_end_step = run_training_loop(
+            phase=1,
             sae=sae,
             whitener=cal.whitener,
             W_vocab=cal.W_vocab,
@@ -141,6 +122,9 @@ class SPALFTrainer:
             disc_schedule=disc_schedule,
             optimizer=optimizer,
             metrics_logger=metrics_logger,
+            lambda_frame=lambda_frame,
+            slow_update_interval=slow_update_interval,
+            phase_transition_patience=phase_transition_patience,
         )
 
         self._save_checkpoint(
@@ -148,13 +132,15 @@ class SPALFTrainer:
             phase1_end_step, phase=1,
         )
 
+        disc_schedule.set_onset(phase1_end_step)
+
         print("Starting Phase 2 training...")
-        run_phase2(
+        run_training_loop(
+            phase=2,
             sae=sae,
             whitener=cal.whitener,
             W_vocab=cal.W_vocab,
             buffer=buffer,
-            store=store,
             config=config,
             tau_faith=cal.tau_faith,
             tau_drift=cal.tau_drift,
@@ -166,6 +152,9 @@ class SPALFTrainer:
             optimizer=optimizer,
             metrics_logger=metrics_logger,
             start_step=phase1_end_step + 1,
+            lambda_frame=lambda_frame,
+            slow_update_interval=slow_update_interval,
+            store=store,
         )
 
         self._save_checkpoint(
@@ -193,9 +182,9 @@ class SPALFTrainer:
             compute_orthogonality_violation,
         )
 
-        x = buffer.next_batch(batch_size).to(self.device)
+        x = buffer.next_batch(batch_size).to(DEVICE)
         x_tilde = whitener.forward(x)
-        x_hat, z, _, _ = sae(x_tilde)
+        x_hat, z, _, _, _ = sae(x_tilde)
 
         v_faith = compute_faithfulness_violation(x, x_hat, whitener, cal.tau_faith)
         v_drift = compute_drift_violation(sae.W_dec_A, W_vocab, cal.tau_drift)

@@ -38,11 +38,6 @@ class StratifiedSAE(nn.Module):
         nn.init.xavier_uniform_(self.W_dec_A)
         nn.init.xavier_uniform_(self.W_dec_B)
 
-    def encode(self, x_tilde: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Encode whitened activations."""
-        pre_act = x_tilde @ self.W_enc.T + self.b_enc
-        return self.jumprelu(pre_act)
-
     def decode(self, z: Tensor) -> Tensor:
         """Decode to original space."""
         z_A = z[:, : self.V]
@@ -50,23 +45,23 @@ class StratifiedSAE(nn.Module):
         return z_A @ self.W_dec_A.T + z_B @ self.W_dec_B.T + self.b_dec
 
     def forward(
-        self, x_tilde: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Encode then decode."""
-        z, gate_mask, l0_probs = self.encode(x_tilde)
-        x_hat = self.decode(z)
-        return x_hat, z, gate_mask, l0_probs
-
-    def forward_fused(
-        self, x_tilde: Tensor, lambda_disc: float
+        self, x_tilde: Tensor, lambda_disc: float = 0.0
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Fused encode/decode with discretization correction."""
+        """Fused encode/decode via Triton kernel with optional discretization correction."""
         pre_act = x_tilde @ self.W_enc.T + self.b_enc
         z, gate_mask, l0_probs, disc_raw = FusedJumpReLUFunction.apply(
-            pre_act, self.jumprelu.log_threshold, self.jumprelu.epsilon, lambda_disc
+            pre_act, self.jumprelu.log_threshold, self.jumprelu.gamma, lambda_disc
         )
         x_hat = self.decode(z)
         return x_hat, z, gate_mask, l0_probs, disc_raw
+
+    @torch.no_grad()
+    def recalibrate_gamma(self, pre_act: Tensor, c_epsilon: float) -> None:
+        """Recalibrate Moreau bandwidth from current pre-activation statistics."""
+        q75 = torch.quantile(pre_act, 0.75, dim=0)  # [F]
+        q25 = torch.quantile(pre_act, 0.25, dim=0)  # [F]
+        iqr = q75 - q25  # [F]
+        self.jumprelu.gamma.copy_((c_epsilon * iqr).pow(2) / 2.0)
 
     @torch.no_grad()
     def normalize_free_decoder(self) -> None:

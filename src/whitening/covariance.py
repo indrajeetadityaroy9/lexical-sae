@@ -6,18 +6,19 @@ import math
 
 import torch
 
+from src.runtime import DEVICE
+
 
 class OnlineCovariance:
     """Welford online covariance estimation with snapshot-based convergence."""
 
-    def __init__(self, d: int, delta_cov: float = 1e-3) -> None:
+    def __init__(self, d: int) -> None:
         self.d = d
-        self.delta_cov = delta_cov
         self.check_interval = min(math.ceil(d**2), 1_000_000)
 
         self._n = 0
-        self._mean = torch.zeros(d, dtype=torch.float64)
-        self._M2 = torch.zeros(d, d, dtype=torch.float64)
+        self._mean = torch.zeros(d, dtype=torch.float64, device=DEVICE)
+        self._M2 = torch.zeros(d, d, dtype=torch.float64, device=DEVICE)
 
         self._snapshot_cov: torch.Tensor | None = None
         self._n_at_snapshot = 0
@@ -29,7 +30,7 @@ class OnlineCovariance:
         Args:
             x: [batch, d] activation tensor.
         """
-        x = x.to(dtype=torch.float64, device="cpu")
+        x = x.to(dtype=torch.float64)
         batch_size = x.shape[0]
 
         batch_mean = x.mean(dim=0)
@@ -63,7 +64,7 @@ class OnlineCovariance:
             current_norm = torch.norm(current_cov, p="fro")
             relative_change = diff_norm / current_norm
 
-            if relative_change < self.delta_cov:
+            if relative_change < 1.0 / self.d:
                 self._converged = True
 
         self._snapshot_cov = current_cov.clone()
@@ -78,8 +79,6 @@ class OnlineCovariance:
 
     def get_covariance(self) -> torch.Tensor:
         """Return the estimated covariance [d, d] in float64."""
-        if self._n < 2:
-            return torch.eye(self.d, dtype=torch.float64)
         return self._M2 / (self._n - 1)
 
     @property

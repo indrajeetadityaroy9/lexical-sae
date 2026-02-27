@@ -9,6 +9,8 @@ from datasets import load_dataset
 from transformer_lens import HookedTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from src.runtime import DEVICE
+
 ModelType = HookedTransformer | AutoModelForCausalLM
 
 
@@ -22,14 +24,13 @@ class ActivationStore:
         dataset_name: str,
         batch_size: int,
         seq_len: int = 128,
-        device: torch.device = torch.device("cuda"),
     ) -> None:
         self.model_name = model_name
         self.hook_point = hook_point
         self.dataset_name = dataset_name
         self.batch_size = batch_size
         self.seq_len = seq_len
-        self.device = device
+        self.device = DEVICE
 
         self._use_transformerlens = False
         self._hook_handle = None

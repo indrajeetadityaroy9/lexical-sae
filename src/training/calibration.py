@@ -7,7 +7,12 @@ import math
 import torch
 
 from src.config import CalibrationResult, SPALFConfig
-from src.constants import C_EPSILON, C_ORTHO, DELTA_COV, DELTA_DRIFT, DELTA_RANK, KAPPA_TARGET
+from src.constants import (
+    C_EPSILON,
+    DELTA_DRIFT,
+    DELTA_RANK,
+    KAPPA_TARGET,
+)
 from src.data.activation_store import ActivationStore
 from src.model.initialization import initialize_sae
 from src.model.sae import StratifiedSAE
@@ -26,14 +31,15 @@ def run_calibration(
     F = config.F if config.F > 0 else 32 * d
     L0_target = config.L0_target if config.L0_target is not None else math.ceil(F / 400)
 
-    cov = OnlineCovariance(d, delta_cov=DELTA_COV)
+    cov = OnlineCovariance(d)
+    cov_max_samples = min(100 * d * d, 200_000_000)
 
     while not cov.has_converged():
         batch = store.next_batch()
-        cov.update(batch.cpu())
+        cov.update(batch)
 
-        if cov.n_samples > 50_000_000:
-            print("Covariance not converged after 50M samples, proceeding anyway")
+        if cov.n_samples > cov_max_samples:
+            print(f"Covariance not converged after {cov_max_samples} samples, proceeding anyway")
             break
 
     print(f"Covariance converged after {cov.n_samples} samples (or limit reached)")
@@ -59,7 +65,7 @@ def run_calibration(
 
     tau_faith = (1.0 - config.R2_target) * d
     tau_drift = DELTA_DRIFT**2 * W_vocab.pow(2).sum().item()
-    tau_ortho = C_ORTHO / d
+    tau_ortho = 0.0  # placeholder — overwritten in initialize_from_calibration
 
     print(
         f"Calibration complete: alpha={whitener.alpha:.6f}, k={whitener.effective_rank}, "
@@ -83,13 +89,18 @@ def initialize_from_calibration(
     cal: CalibrationResult,
     store: ActivationStore,
 ) -> StratifiedSAE:
-    """Create and initialize the SAE from calibration outputs."""
+    """Create and initialize the SAE from calibration outputs.
+
+    Also measures initial orthogonality to set cal.tau_ortho (mutated in-place).
+    """
+    from src.constraints import compute_orthogonality_violation
+
     device = cal.W_vocab.device
 
     sae = StratifiedSAE(cal.d, cal.F, cal.V).to(device)
 
     samples = []
-    n_needed = min(50_000, store.batch_size * 20)
+    n_needed = min(max(100 * cal.F // cal.L0_target, 10_000), store.batch_size * 20)
     while sum(s.shape[0] for s in samples) < n_needed:
         samples.append(store.next_batch())
     activation_sample = torch.cat(samples, dim=0)[:n_needed].to(device)
@@ -102,5 +113,16 @@ def initialize_from_calibration(
         L0_target=cal.L0_target,
         c_epsilon=C_EPSILON,
     )
+
+    # Measure initial orthogonality from initialized geometry
+    with torch.no_grad():
+        batch_size = min(activation_sample.shape[0], 4096)
+        x_sample = activation_sample[:batch_size]
+        x_tilde = cal.whitener.forward(x_sample)
+        _, z_init, _, _, _ = sae(x_tilde)
+        raw_ortho = compute_orthogonality_violation(
+            z_init, sae.W_dec_A, sae.W_dec_B, 0.0
+        ).item()
+    cal.tau_ortho = max(raw_ortho, 1.0 / cal.d)
 
     return sae

@@ -40,7 +40,7 @@ def _patched_forward_tl(
 
     x_flat = x_raw.reshape(-1, d).float()
     x_tilde = whitener.forward(x_flat)
-    x_hat_flat, z, gate_mask, _ = sae(x_tilde)
+    x_hat_flat, z, gate_mask, _, _ = sae(x_tilde)
     x_hat = x_hat_flat.reshape(B, S, d).to(x_raw.dtype)
 
     def patch_hook(value, hook):
@@ -68,7 +68,7 @@ def _patched_forward_hf(
 
     x_flat = x_raw.reshape(-1, d).float()
     x_tilde = whitener.forward(x_flat)
-    x_hat_flat, z, gate_mask, _ = sae(x_tilde)
+    x_hat_flat, z, gate_mask, _, _ = sae(x_tilde)
     x_hat = x_hat_flat.reshape(B, S, d).to(x_raw.dtype)
 
     original_hook = store._hook_handle
@@ -76,15 +76,10 @@ def _patched_forward_hf(
     layer_idx = store._parse_layer_index()
     target_module = store._resolve_hf_layer(model, layer_idx)
 
-    injected = False
-
     def inject_hook(module, input, output):
-        nonlocal injected
-        if not injected:
-            injected = True
-            if isinstance(output, tuple):
-                return (x_hat,) + output[1:]
-            return x_hat
+        if isinstance(output, tuple):
+            return (x_hat,) + output[1:]
+        return x_hat
 
     handle = target_module.register_forward_hook(inject_hook)
     patched_outputs = model(tokens)

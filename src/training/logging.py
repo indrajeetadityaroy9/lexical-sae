@@ -30,7 +30,11 @@ class StepMetrics:
     rho_faith: float = 0.0
     rho_drift: float = 0.0
     rho_ortho: float = 0.0
-    omega_o: float = 0.0
+
+    # Per-constraint observer gains
+    omega_o_faith: float = 0.0
+    omega_o_drift: float = 0.0
+    omega_o_ortho: float = 0.0
 
     lambda_disc: float = 0.0
     disc_correction: float = 0.0
@@ -40,11 +44,13 @@ class StepMetrics:
 
     kl_div: float = 0.0
 
+    frame_energy: float = 0.0
+
 
 class MetricsLogger:
     """Logs training metrics at regular intervals."""
 
-    def __init__(self, log_interval: int = 100, **_kwargs) -> None:
+    def __init__(self, log_interval: int = 100) -> None:
         self.log_interval = log_interval
 
     def log_step(self, metrics: StepMetrics) -> None:
@@ -57,7 +63,7 @@ class MetricsLogger:
             f"v=[{m.v_fast_faith:+.4f}, {m.v_fast_drift:+.4f}, {m.v_fast_ortho:+.4f}] | "
             f"lam=[{m.lambda_faith:.3f}, {m.lambda_drift:.3f}, {m.lambda_ortho:.3f}] | "
             f"rho=[{m.rho_faith:.3f}, {m.rho_drift:.3f}, {m.rho_ortho:.3f}] | "
-            f"omega={m.omega_o:.3f}"
+            f"omega=[{m.omega_o_faith:.3f}, {m.omega_o_drift:.3f}, {m.omega_o_ortho:.3f}]"
         )
 
     def log_phase_transition(self, step: int, reason: str) -> None:
