@@ -1,15 +1,14 @@
 """Hybrid activation streaming: TransformerLens for supported models, HuggingFace hooks otherwise."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
+import json
 
 import torch
 from datasets import load_dataset
 from transformer_lens import HookedTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.runtime import DEVICE
+device = torch.device("cuda")
 
 ModelType = HookedTransformer | AutoModelForCausalLM
 
@@ -30,7 +29,7 @@ class ActivationStore:
         self.dataset_name = dataset_name
         self.batch_size = batch_size
         self.seq_len = seq_len
-        self.device = DEVICE
+        self.device = device
 
         self._use_transformerlens = False
         self._hook_handle = None
@@ -56,12 +55,32 @@ class ActivationStore:
                 dtype=torch.bfloat16,
             )
             self._use_transformerlens = True
-            print(f"Loaded {self.model_name} via TransformerLens")
+            print(
+                json.dumps(
+                    {
+                        "event": "model_loaded",
+                        "backend": "transformerlens",
+                        "model_name": self.model_name,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             return model
         except ValueError:
             pass
 
-        print(f"TransformerLens does not support {self.model_name}, using HuggingFace hooks")
+        print(
+            json.dumps(
+                {
+                    "event": "model_loaded",
+                    "backend": "huggingface",
+                    "model_name": self.model_name,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
@@ -76,14 +95,13 @@ class ActivationStore:
         layer_idx = self._parse_layer_index()
         target_module = self._resolve_hf_layer(model, layer_idx)
 
-        def hook_fn(module, input, output):
+        def hook_fn(_module, _input, output):
             if isinstance(output, tuple):
                 self._captured_activations = output[0].detach()
             else:
                 self._captured_activations = output.detach()
 
         self._hook_handle = target_module.register_forward_hook(hook_fn)
-        print(f"Registered HF hook on layer {layer_idx}")
 
     def _parse_layer_index(self) -> int:
         """Extract layer index from hook_point string like 'blocks.6.hook_resid_post'."""
@@ -116,7 +134,6 @@ class ActivationStore:
                         break
                     module = getattr(module, attr)
             if resolved:
-                print(f"Resolved HF layer via {attr_path}")
                 return module
         raise ValueError(f"Unable to resolve HuggingFace layer {layer_idx} for hook registration")
 
@@ -172,7 +189,7 @@ class ActivationStore:
             return lm_head.weight.T.float()
 
     def get_model(self) -> ModelType:
-        """Return the underlying model (for Phase 2 KL computation)."""
+        """Return the underlying model (for KL computation via patched forward)."""
         return self.model
 
     @property

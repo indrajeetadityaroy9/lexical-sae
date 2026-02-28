@@ -1,16 +1,11 @@
 """SPALF experiment configuration: minimal research-relevant parameters only."""
 
-from __future__ import annotations
-
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
-
-if TYPE_CHECKING:
-    from torch import Tensor
+from torch import Tensor
 
 
 @dataclass
@@ -33,6 +28,9 @@ class SPALFConfig:
 
     seed: int = 42
     output_dir: str = "runs/default"
+
+    resume_from_checkpoint: str = ""
+    checkpoint_interval: int = 5000
 
     checkpoint: str = ""
     eval_suites: list[str] = field(
@@ -69,12 +67,12 @@ class SPALFConfig:
 class CalibrationResult:
     """Calibration outputs shared across training and checkpointing."""
 
-    whitener: object  # SoftZCAWhitener (avoid circular import)
-    W_vocab: Tensor  # [d, V]
+    whitener: "SoftZCAWhitener"
+    W_vocab: Tensor
     d: int
     V: int
-    F: int  # final (after auto-compute from d_model)
-    L0_target: int  # final (after auto-compute from F)
+    F: int
+    L0_target: int
     tau_faith: float
     tau_drift: float
     tau_ortho: float

@@ -1,6 +1,6 @@
-"""Soft-ZCA whitening transform (§1.2): full and low-rank variants."""
+"""Soft-ZCA whitening transform: full and low-rank variants."""
 
-from __future__ import annotations
+import json
 
 import torch
 from torch import Tensor
@@ -52,7 +52,19 @@ class SoftZCAWhitener:
             self._inv_scale_k = (self._Lambda_k + self._alpha).sqrt()
             self._inv_scale_tail = (self._lambda_bar + self._alpha) ** 0.5
 
-            print(f"Low-rank whitener: d={self.d}, k={self._k}, α={self._alpha:.4f}")
+            print(
+                json.dumps(
+                    {
+                        "event": "whitener_ready",
+                        "mode": "low_rank",
+                        "d": self.d,
+                        "k": self._k,
+                        "alpha": self._alpha,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
         else:
             scales = (self._eigenvalues + self._alpha).rsqrt()
             U = self._eigenvectors
@@ -63,7 +75,19 @@ class SoftZCAWhitener:
 
             self._precision = self._W_white.T @ self._W_white
 
-            print(f"Full whitener: d={self.d}, k={self._k}, α={self._alpha:.4f}")
+            print(
+                json.dumps(
+                    {
+                        "event": "whitener_ready",
+                        "mode": "full",
+                        "d": self.d,
+                        "k": self._k,
+                        "alpha": self._alpha,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
 
     @classmethod
     def from_covariance(
@@ -83,7 +107,19 @@ class SoftZCAWhitener:
 
         eigenvalues = eigenvalues.clamp(min=1e-12)
 
-        print(f"Eigenspectrum: λ_max={eigenvalues[0]:.4f}, λ_min={eigenvalues[-1]:.6f}, κ={eigenvalues[0] / eigenvalues[-1]:.0f}, n_samples={cov.n_samples}")
+        print(
+            json.dumps(
+                {
+                    "event": "covariance_spectrum",
+                    "lambda_max": eigenvalues[0].item(),
+                    "lambda_min": eigenvalues[-1].item(),
+                    "condition_number": (eigenvalues[0] / eigenvalues[-1]).item(),
+                    "n_samples": cov.n_samples,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
         return cls(
             mean=mean,
@@ -187,9 +223,14 @@ class SoftZCAWhitener:
             "mean": self._mean,
             "eigenvalues": self._eigenvalues,
             "eigenvectors": self._eigenvectors,
-            "kappa_target": self.kappa_target,
-            "alpha": self._alpha,
-            "effective_rank": self._effective_rank,
-            "d": self.d,
+            "kappa_target": torch.tensor(self.kappa_target),
         }
 
+    def load_state_dict(self, sd: dict) -> None:
+        """Restore whitener from checkpoint state."""
+        self.__init__(
+            mean=sd["mean"],
+            eigenvalues=sd["eigenvalues"],
+            eigenvectors=sd["eigenvectors"],
+            kappa_target=float(sd["kappa_target"].item()),
+        )

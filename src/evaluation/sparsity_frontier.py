@@ -1,13 +1,12 @@
 """Sparsity frontier: L0 vs CE loss Pareto curve via threshold sweeping."""
 
-from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
 from src.data.activation_store import ActivationStore
 from src.data.patching import run_patched_forward
-from src.model.sae import StratifiedSAE
+from src.sae import StratifiedSAE
 from src.whitening.whitener import SoftZCAWhitener
 
 
@@ -25,12 +24,12 @@ def compute_sparsity_frontier(
 
     device = next(sae.parameters()).device
 
-    orig_log_threshold = sae.jumprelu.log_threshold.data.clone()
+    orig_log_threshold = sae.log_threshold.data.clone()
 
     results = []
 
     for mult in multipliers:
-        sae.jumprelu.log_threshold.data = orig_log_threshold + torch.tensor(mult).log()
+        sae.log_threshold.data = orig_log_threshold + torch.tensor(mult).log()
 
         total_l0 = 0.0
         total_mse = 0.0
@@ -75,8 +74,7 @@ def compute_sparsity_frontier(
             "mse": total_mse / total_activations,
         }
         results.append(point)
-        print(f"Frontier m={point['multiplier']:.2f}: L0={point['l0']:.1f}, ΔCE={point['ce_loss_increase']:.4f}, MSE={point['mse']:.4f}")
 
-    sae.jumprelu.log_threshold.data = orig_log_threshold
+    sae.log_threshold.data = orig_log_threshold
 
     return results

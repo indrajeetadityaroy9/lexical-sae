@@ -1,13 +1,12 @@
 """Downstream loss evaluation: CE loss increase and KL divergence with SAE patching."""
 
-from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
 from src.data.activation_store import ActivationStore
 from src.data.patching import run_patched_forward
-from src.model.sae import StratifiedSAE
+from src.sae import StratifiedSAE
 from src.whitening.whitener import SoftZCAWhitener
 
 
@@ -66,5 +65,4 @@ def evaluate_downstream_loss(
         "ce_loss_increase": avg_ce_patched - avg_ce_orig,
         "kl_div": avg_kl,
     }
-    print(f"Downstream loss results: {results}")
     return results

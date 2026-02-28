@@ -1,7 +1,7 @@
 """Calibration routines."""
 
-from __future__ import annotations
 
+import json
 import math
 
 import torch
@@ -14,8 +14,8 @@ from src.constants import (
     KAPPA_TARGET,
 )
 from src.data.activation_store import ActivationStore
-from src.model.initialization import initialize_sae
-from src.model.sae import StratifiedSAE
+from src.initialization import initialize_sae
+from src.sae import StratifiedSAE
 from src.whitening.covariance import OnlineCovariance
 from src.whitening.whitener import SoftZCAWhitener
 
@@ -26,7 +26,7 @@ def run_calibration(
 ) -> CalibrationResult:
     """Build covariance, whitener, vocabulary slice, and constraint thresholds."""
     d = store.d_model
-    print(f"Starting calibration phase: d={d}")
+    print(json.dumps({"event": "calibration_start", "d": d}, sort_keys=True), flush=True)
 
     F = config.F if config.F > 0 else 32 * d
     L0_target = config.L0_target if config.L0_target is not None else math.ceil(F / 400)
@@ -39,10 +39,30 @@ def run_calibration(
         cov.update(batch)
 
         if cov.n_samples > cov_max_samples:
-            print(f"Covariance not converged after {cov_max_samples} samples, proceeding anyway")
+            print(
+                json.dumps(
+                    {
+                        "event": "covariance_limit_reached",
+                        "max_samples": cov_max_samples,
+                        "n_samples": cov.n_samples,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             break
 
-    print(f"Covariance converged after {cov.n_samples} samples (or limit reached)")
+    print(
+        json.dumps(
+            {
+                "event": "covariance_ready",
+                "converged": cov.has_converged(),
+                "n_samples": cov.n_samples,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
     whitener = SoftZCAWhitener.from_covariance(
         cov,
@@ -57,7 +77,17 @@ def run_calibration(
         _, top_indices = norms.topk(config.V_cap)
         top_indices = top_indices.sort().values
         W_vocab = W_vocab_full[:, top_indices]
-        print(f"Capped vocabulary from {W_vocab_full.shape[1]} to {config.V_cap} (V_cap)")
+        print(
+            json.dumps(
+                {
+                    "event": "vocab_capped",
+                    "vocab_size_full": W_vocab_full.shape[1],
+                    "vocab_size_kept": config.V_cap,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     else:
         W_vocab = W_vocab_full
 
@@ -65,11 +95,23 @@ def run_calibration(
 
     tau_faith = (1.0 - config.R2_target) * d
     tau_drift = DELTA_DRIFT**2 * W_vocab.pow(2).sum().item()
-    tau_ortho = 0.0  # placeholder — overwritten in initialize_from_calibration
+    tau_ortho = 0.0
 
     print(
-        f"Calibration complete: alpha={whitener.alpha:.6f}, k={whitener.effective_rank}, "
-        f"V={V}, F={F}, L0_target={L0_target}"
+        json.dumps(
+            {
+                "event": "calibration_ready",
+                "alpha": whitener.alpha,
+                "effective_rank": whitener.effective_rank,
+                "V": V,
+                "F": F,
+                "L0_target": L0_target,
+                "tau_faith": tau_faith,
+                "tau_drift": tau_drift,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
     )
 
     return CalibrationResult(
@@ -93,7 +135,7 @@ def initialize_from_calibration(
 
     Also measures initial orthogonality to set cal.tau_ortho (mutated in-place).
     """
-    from src.constraints import compute_orthogonality_violation
+    from src.optimization.constraints import compute_orthogonality_violation
 
     device = cal.W_vocab.device
 
@@ -114,14 +156,14 @@ def initialize_from_calibration(
         c_epsilon=C_EPSILON,
     )
 
-    # Measure initial orthogonality from initialized geometry
+    # Set tau_ortho from initialized geometry to keep the first constraint scale data-driven.
     with torch.no_grad():
         batch_size = min(activation_sample.shape[0], 4096)
         x_sample = activation_sample[:batch_size]
         x_tilde = cal.whitener.forward(x_sample)
         _, z_init, _, _, _ = sae(x_tilde)
         raw_ortho = compute_orthogonality_violation(
-            z_init, sae.W_dec_A, sae.W_dec_B, 0.0
+            z_init, sae.W_dec_A, sae.W_dec_B, 0.0, sae.gamma
         ).item()
     cal.tau_ortho = max(raw_ortho, 1.0 / cal.d)
 

@@ -1,13 +1,14 @@
-"""Stratified Sparse Autoencoder: V anchored + (F-V) free decoder columns (§2)."""
+"""Stratified Sparse Autoencoder: V anchored + (F-V) free decoder columns.
 
-from __future__ import annotations
+JumpReLU gating with learnable log-thresholds and Moreau bandwidth (γ).
+Forward/backward logic lives in the fused Triton kernel (src/kernel.py).
+"""
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from src.kernels.jumprelu_kernel import FusedJumpReLUFunction
-from src.model.jumprelu import JumpReLU
+from src.kernel import FusedJumpReLUFunction
 
 
 class StratifiedSAE(nn.Module):
@@ -28,12 +29,9 @@ class StratifiedSAE(nn.Module):
 
         self.b_dec = nn.Parameter(torch.zeros(d))
 
-        self.jumprelu = JumpReLU(F)
+        self.log_threshold = nn.Parameter(torch.zeros(F))
+        self.register_buffer("gamma", torch.ones(F))
 
-        self._default_init()
-
-    def _default_init(self) -> None:
-        """Default Xavier initialization (overridden by initialize_sae)."""
         nn.init.xavier_uniform_(self.W_enc)
         nn.init.xavier_uniform_(self.W_dec_A)
         nn.init.xavier_uniform_(self.W_dec_B)
@@ -50,7 +48,7 @@ class StratifiedSAE(nn.Module):
         """Fused encode/decode via Triton kernel with optional discretization correction."""
         pre_act = x_tilde @ self.W_enc.T + self.b_enc
         z, gate_mask, l0_probs, disc_raw = FusedJumpReLUFunction.apply(
-            pre_act, self.jumprelu.log_threshold, self.jumprelu.gamma, lambda_disc
+            pre_act, self.log_threshold, self.gamma, lambda_disc
         )
         x_hat = self.decode(z)
         return x_hat, z, gate_mask, l0_probs, disc_raw
@@ -58,10 +56,10 @@ class StratifiedSAE(nn.Module):
     @torch.no_grad()
     def recalibrate_gamma(self, pre_act: Tensor, c_epsilon: float) -> None:
         """Recalibrate Moreau bandwidth from current pre-activation statistics."""
-        q75 = torch.quantile(pre_act, 0.75, dim=0)  # [F]
-        q25 = torch.quantile(pre_act, 0.25, dim=0)  # [F]
-        iqr = q75 - q25  # [F]
-        self.jumprelu.gamma.copy_((c_epsilon * iqr).pow(2) / 2.0)
+        q75 = torch.quantile(pre_act, 0.75, dim=0)
+        q25 = torch.quantile(pre_act, 0.25, dim=0)
+        iqr = q75 - q25
+        self.gamma.copy_((c_epsilon * iqr).pow(2) / 2.0)
 
     @torch.no_grad()
     def normalize_free_decoder(self) -> None:

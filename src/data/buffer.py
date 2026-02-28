@@ -1,7 +1,5 @@
 """In-memory activation buffer with shuffling for decorrelation."""
 
-from __future__ import annotations
-
 import torch
 
 from src.data.activation_store import ActivationStore

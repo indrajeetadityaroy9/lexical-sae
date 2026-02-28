@@ -1,78 +1,38 @@
-"""Checkpoint save/load using safetensors (§ checkpoint migration)."""
-
-from __future__ import annotations
+"""Checkpoint utilities for Accelerate-managed training state + frozen calibration artifacts."""
 
 import json
 from pathlib import Path
 
 import torch
-from safetensors.torch import load_file, load_model, save_file, save_model
+from safetensors.torch import load_file, load_model, save_file
 from torch import Tensor
 
 from src.config import CalibrationResult, SPALFConfig
-from src.control.adrc import ADRCController
-from src.control.capu import ModifiedCAPU
-from src.control.ema_filter import DualRateEMA
-from src.model.sae import StratifiedSAE
-from src.runtime import DEVICE
+from src.sae import StratifiedSAE
 from src.whitening.whitener import SoftZCAWhitener
 
+device = torch.device("cuda")
 
-def save_checkpoint(
-    sae: StratifiedSAE,
+
+def save_calibration_state(
+    output_dir: str | Path,
+    whitener: SoftZCAWhitener,
+    W_vocab: Tensor,
     cal: CalibrationResult,
     config: SPALFConfig,
-    adrc: ADRCController,
-    capu: ModifiedCAPU,
-    ema: DualRateEMA,
-    optimizer: torch.optim.Optimizer,
     step: int,
-    phase: int,
-) -> Path:
-    """Save checkpoint as safetensors files plus metadata."""
-    ckpt_dir = Path(config.output_dir) / f"spalf_phase{phase}_step{step}"
+) -> None:
+    """Save frozen calibration artifacts alongside an Accelerate checkpoint."""
+
+    ckpt_dir = Path(output_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    save_model(sae, str(ckpt_dir / "model.safetensors"))
-
-    w_sd = cal.whitener.state_dict()
-    save_file(
-        {
-            "mean": w_sd["mean"],
-            "eigenvalues": w_sd["eigenvalues"],
-            "eigenvectors": w_sd["eigenvectors"],
-            "W_vocab": cal.W_vocab,
-        },
-        str(ckpt_dir / "tensors.safetensors"),
-    )
-
-    control_tensors = {}
-    for k, v in adrc.state_dict().items():
-        if isinstance(v, Tensor):
-            control_tensors[f"adrc.{k}"] = v
-        elif isinstance(v, dict):
-            for ek, ev in v.items():
-                if isinstance(ev, Tensor):
-                    control_tensors[f"adrc.eso.{ek}"] = ev
-    for k, v in capu.state_dict().items():
-        if isinstance(v, Tensor):
-            control_tensors[f"capu.{k}"] = v
-    for k, v in ema.state_dict().items():
-        if isinstance(v, Tensor):
-            control_tensors[f"ema.{k}"] = v
-    save_file(control_tensors, str(ckpt_dir / "control.safetensors"))
-
-    opt_sd = optimizer.state_dict()
-    opt_tensors = {}
-    for pid, state in opt_sd["state"].items():
-        for k, v in state.items():
-            if isinstance(v, Tensor):
-                opt_tensors[f"state.{pid}.{k}"] = v
-    save_file(opt_tensors, str(ckpt_dir / "optimizer.safetensors"))
+    sd = whitener.state_dict()
+    sd["W_vocab"] = W_vocab
+    save_file(sd, str(ckpt_dir / "calibration.safetensors"))
 
     metadata = {
         "step": step,
-        "phase": phase,
         "config": config.to_dict(),
         "calibration": {
             "d": cal.d,
@@ -80,56 +40,49 @@ def save_checkpoint(
             "F": cal.F,
             "L0_target": cal.L0_target,
         },
-        "whitener": {
-            "kappa_target": w_sd["kappa_target"],
-            "alpha": w_sd["alpha"],
-            "effective_rank": w_sd["effective_rank"],
-            "d": w_sd["d"],
-        },
-        "optimizer_param_groups": opt_sd["param_groups"],
-        "optimizer_scalar_state": {
-            str(pid): {k: v for k, v in state.items() if not isinstance(v, Tensor)}
-            for pid, state in opt_sd["state"].items()
-        },
     }
     with open(ckpt_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2, default=str)
-
-    print(f"Checkpoint saved: {ckpt_dir}")
-    return ckpt_dir
 
 
 def load_checkpoint(
     checkpoint_path: str | Path,
 ) -> tuple[StratifiedSAE, SoftZCAWhitener, Tensor]:
-    """Load SAE, whitener, and vocabulary matrix from a checkpoint."""
+    """Load SAE, whitener, and vocabulary matrix for evaluation."""
     ckpt_dir = Path(checkpoint_path)
 
     with open(ckpt_dir / "metadata.json") as f:
         metadata = json.load(f)
 
     cal_data = metadata["calibration"]
-    w_meta = metadata["whitener"]
 
     sae = StratifiedSAE(d=cal_data["d"], F=cal_data["F"], V=cal_data["V"])
     load_model(sae, str(ckpt_dir / "model.safetensors"))
-    sae.to(DEVICE)
+    sae.to(device)
     sae.eval()
 
-    tensors = load_file(str(ckpt_dir / "tensors.safetensors"), device=str(DEVICE))
-    whitener = SoftZCAWhitener(
-        mean=tensors["mean"],
-        eigenvalues=tensors["eigenvalues"],
-        eigenvectors=tensors["eigenvectors"],
-        kappa_target=w_meta["kappa_target"],
+    cal_state = load_file(
+        str(ckpt_dir / "calibration.safetensors"), device=str(device)
     )
-    whitener.to(DEVICE)
+    whitener = SoftZCAWhitener.__new__(SoftZCAWhitener)
+    whitener.load_state_dict(cal_state)
+    whitener.to(device)
 
-    W_vocab = tensors["W_vocab"].to(DEVICE)
+    W_vocab = cal_state["W_vocab"].to(device)
 
     print(
-        f"Loaded checkpoint: step={metadata['step']}, phase={metadata['phase']}, "
-        f"d={cal_data['d']}, F={cal_data['F']}, V={cal_data['V']}"
+        json.dumps(
+            {
+                "event": "checkpoint_loaded",
+                "step": metadata["step"],
+                "d": cal_data["d"],
+                "F": cal_data["F"],
+                "V": cal_data["V"],
+                "path": str(ckpt_dir),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
     )
 
     return sae, whitener, W_vocab

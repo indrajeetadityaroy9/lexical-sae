@@ -1,7 +1,5 @@
 """Fused JumpReLU Triton kernels with Moreau envelope STE."""
 
-from __future__ import annotations
-
 import torch
 import triton
 import triton.language as tl
@@ -75,12 +73,11 @@ def _moreau_ste_bwd_kernel(
     u = x - theta
     bandwidth = tl.sqrt(2.0 * gamma)
 
-    # Transition zone: -bandwidth < u <= 0
     in_zone = (u > -bandwidth) & (u <= 0.0)
     moreau_grad = tl.where(in_zone, -u / gamma, 0.0)
 
     grad_x = grad_l0 * moreau_grad
-    grad_t = -grad_l0 * moreau_grad  # threshold gradient = negative of activation gradient
+    grad_t = -grad_l0 * moreau_grad
 
     tl.store(grad_pre_act_ptr + offsets, grad_x, mask=mask)
     tl.atomic_add(grad_theta_ptr + feat_idx, grad_t, mask=mask)
@@ -128,7 +125,7 @@ class FusedJumpReLUFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        ctx, grad_z: Tensor, grad_gate: Tensor, grad_l0: Tensor, grad_disc: Tensor
+        ctx, grad_z: Tensor, _grad_gate: Tensor, _grad_l0: Tensor, _grad_disc: Tensor
     ) -> tuple[Tensor | None, Tensor | None, None, None]:
         pre_act, theta, gamma = ctx.saved_tensors
         F = ctx.F
@@ -149,6 +146,7 @@ class FusedJumpReLUFunction(torch.autograd.Function):
             n_elements, F=F, BLOCK_SIZE=BLOCK_SIZE,
         )
 
+        # Route discretization gradients to pre-activations only; thresholds stay L0-controlled.
         below = pre_act * (1.0 - gate)
         grad_pre_act_from_disc = grad_disc * 2.0 * below * (1.0 - gate)
 

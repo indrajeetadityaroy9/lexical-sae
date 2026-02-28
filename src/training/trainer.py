@@ -1,35 +1,37 @@
-"""Top-level SPALF trainer."""
+"""Top-level SPALF trainer with Accelerate-managed checkpointing."""
 
-from __future__ import annotations
+import json
+import math
+import random
+from pathlib import Path
 
+import numpy as np
 import torch
+from accelerate import Accelerator
+from accelerate.utils import ProjectConfiguration
 
 from src.config import CalibrationResult, SPALFConfig
 from src.constants import (
     BETA_SLOW,
-    C_ETA,
-    C_FRAME,
     EPS_NUM,
     LAMBDA_DISC_MAX,
-    LOG_INTERVAL,
-    OMEGA_O_INIT,
-    RHO_0,
 )
-from src.control.adrc import ADRCController
-from src.control.capu import ModifiedCAPU
-from src.control.ema_filter import DualRateEMA
 from src.data.activation_store import ActivationStore
 from src.data.buffer import ActivationBuffer
-from src.model.sae import StratifiedSAE
-from src.runtime import DEVICE, set_seed
+from src.optimization.capu import MonotoneCAPU
+from src.optimization.discretization import DiscretizationSchedule
+from src.optimization.dual_updater import DualUpdater
+from src.optimization.ema_filter import DualRateEMA
+from src.sae import StratifiedSAE
 from src.training.calibration import initialize_from_calibration, run_calibration
-from src.training.logging import MetricsLogger
-from src.training.loop import DiscretizationSchedule, run_training_loop
+from src.training.loop import run_training_loop
 from src.whitening.whitener import SoftZCAWhitener
+
+device = torch.device("cuda")
 
 
 class SPALFTrainer:
-    """Orchestrates calibration, training phases, and checkpointing."""
+    """Orchestrates calibration, training, and checkpointing."""
 
     def __init__(self, config: SPALFConfig) -> None:
         self.config = config
@@ -37,9 +39,33 @@ class SPALFTrainer:
     def train(self) -> StratifiedSAE:
         """Run full training pipeline."""
         config = self.config
-        set_seed(config.seed)
+        random.seed(config.seed)
+        np.random.seed(config.seed)
+        torch.manual_seed(config.seed)
+        torch.cuda.manual_seed_all(config.seed)
 
-        print(f"Creating activation store for {config.model_name}")
+        project_config = ProjectConfiguration(
+            project_dir=config.output_dir,
+            automatic_checkpoint_naming=True,
+            total_limit=3,
+        )
+        accelerator = Accelerator(
+            mixed_precision="no",
+            project_configuration=project_config,
+        )
+
+        print(
+            json.dumps(
+                {
+                    "event": "train_start",
+                    "model_name": config.model_name,
+                    "output_dir": config.output_dir,
+                    "seed": config.seed,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
         store = ActivationStore(
             model_name=config.model_name,
             hook_point=config.hook_point,
@@ -50,27 +76,33 @@ class SPALFTrainer:
 
         buffer = ActivationBuffer(store, buffer_size=2**20)
 
-        print("Running calibration phase...")
         cal = run_calibration(config, store)
-        print(f"d={cal.d}, F={cal.F}, L0_target={cal.L0_target}, V={cal.V}")
 
-        print("Initializing StratifiedSAE...")
         sae = initialize_from_calibration(cal, store)
-        sae = sae.to(DEVICE)
+        sae = sae.to(device)
         sae = torch.compile(sae, mode="max-autotune")
-        print(f"SAE initialized: d={sae.d}, F={sae.F}, V={sae.V}, F_free={sae.F_free}")
 
-        lambda_frame = C_FRAME / sae.d
-
-        # Derive constants from BETA_SLOW (two-timescale theory)
-        beta_fast = 1.0 - 10.0 * (1.0 - BETA_SLOW)
+        # R = ceil(log2(F/d)) enforces fast/slow separation for two-timescale updates.
+        R = max(math.ceil(math.log2(cal.F / cal.d)), 2)
+        beta_fast = 1.0 - R * (1.0 - BETA_SLOW)
         slow_update_interval = round(1.0 / (1.0 - BETA_SLOW))
-        phase_transition_patience = slow_update_interval
 
         initial_violations = self._measure_initial_violations(
             sae, cal.whitener, cal.W_vocab, buffer, cal, config.batch_size
         )
-        print(f"Initial violations: {initial_violations.tolist()}")
+        print(
+            json.dumps(
+                {
+                    "event": "initial_violations",
+                    "faith": initial_violations[0].item(),
+                    "drift": initial_violations[1].item(),
+                    "ortho": initial_violations[2].item(),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        rho_0 = 1.0 / (initial_violations.abs().mean().item() + EPS_NUM)
 
         ema = DualRateEMA(
             n_constraints=3,
@@ -78,16 +110,11 @@ class SPALFTrainer:
             beta_slow=BETA_SLOW,
         )
 
-        adrc = ADRCController(
-            n_constraints=3,
-            omega_o_init=OMEGA_O_INIT,
-            beta_fast=beta_fast,
-        )
+        dual_updater = DualUpdater(n_constraints=3)
 
-        capu = ModifiedCAPU(
+        capu = MonotoneCAPU(
             initial_violations=initial_violations,
-            c_eta=C_ETA,
-            rho_0=RHO_0,
+            rho_0=rho_0,
             beta_slow=BETA_SLOW,
             eps_num=EPS_NUM,
         )
@@ -100,43 +127,43 @@ class SPALFTrainer:
 
         optimizer = torch.optim.Adam(sae.parameters(), lr=config.lr, betas=(0.9, 0.999))
 
-        metrics_logger = MetricsLogger(log_interval=LOG_INTERVAL)
-        metrics_logger.log_calibration(
-            cal.whitener.alpha, cal.whitener.effective_rank, cal.V
+        sae, optimizer = accelerator.prepare(sae, optimizer)
+        accelerator.register_for_checkpointing(dual_updater, capu, ema, disc_schedule)
+
+        start_step = 0
+        if config.resume_from_checkpoint:
+            accelerator.load_state(config.resume_from_checkpoint)
+            with open(Path(config.resume_from_checkpoint) / "metadata.json") as f:
+                start_step = json.load(f)["step"]
+            print(
+                json.dumps(
+                    {
+                        "event": "resume",
+                        "checkpoint": config.resume_from_checkpoint,
+                        "step": start_step,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+
+        print(
+            json.dumps(
+                {
+                    "event": "train_config",
+                    "alpha": cal.whitener.alpha,
+                    "effective_rank": cal.whitener.effective_rank,
+                    "V": cal.V,
+                    "total_steps": total_steps,
+                    "slow_update_interval": slow_update_interval,
+                    "rho_0": rho_0,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
         )
 
-        print("Starting Phase 1 training...")
-        phase1_end_step = run_training_loop(
-            phase=1,
-            sae=sae,
-            whitener=cal.whitener,
-            W_vocab=cal.W_vocab,
-            buffer=buffer,
-            config=config,
-            tau_faith=cal.tau_faith,
-            tau_drift=cal.tau_drift,
-            tau_ortho=cal.tau_ortho,
-            adrc=adrc,
-            capu=capu,
-            ema=ema,
-            disc_schedule=disc_schedule,
-            optimizer=optimizer,
-            metrics_logger=metrics_logger,
-            lambda_frame=lambda_frame,
-            slow_update_interval=slow_update_interval,
-            phase_transition_patience=phase_transition_patience,
-        )
-
-        self._save_checkpoint(
-            sae, cal, config, adrc, capu, ema, optimizer,
-            phase1_end_step, phase=1,
-        )
-
-        disc_schedule.set_onset(phase1_end_step)
-
-        print("Starting Phase 2 training...")
         run_training_loop(
-            phase=2,
             sae=sae,
             whitener=cal.whitener,
             W_vocab=cal.W_vocab,
@@ -145,24 +172,19 @@ class SPALFTrainer:
             tau_faith=cal.tau_faith,
             tau_drift=cal.tau_drift,
             tau_ortho=cal.tau_ortho,
-            adrc=adrc,
+            dual_updater=dual_updater,
             capu=capu,
             ema=ema,
             disc_schedule=disc_schedule,
             optimizer=optimizer,
-            metrics_logger=metrics_logger,
-            start_step=phase1_end_step + 1,
-            lambda_frame=lambda_frame,
             slow_update_interval=slow_update_interval,
+            cal=cal,
+            accelerator=accelerator,
+            start_step=start_step,
             store=store,
         )
 
-        self._save_checkpoint(
-            sae, cal, config, adrc, capu, ema, optimizer,
-            total_steps, phase=2,
-        )
-
-        print("Training complete.")
+        print(json.dumps({"event": "train_complete"}, sort_keys=True), flush=True)
         return sae
 
     @torch.no_grad()
@@ -176,37 +198,20 @@ class SPALFTrainer:
         batch_size: int,
     ) -> torch.Tensor:
         """Measure initial constraint violations for CAPU calibration."""
-        from src.constraints import (
+        from src.optimization.constraints import (
             compute_drift_violation,
             compute_faithfulness_violation,
             compute_orthogonality_violation,
         )
 
-        x = buffer.next_batch(batch_size).to(DEVICE)
+        x = buffer.next_batch(batch_size).to(device)
         x_tilde = whitener.forward(x)
         x_hat, z, _, _, _ = sae(x_tilde)
 
         v_faith = compute_faithfulness_violation(x, x_hat, whitener, cal.tau_faith)
         v_drift = compute_drift_violation(sae.W_dec_A, W_vocab, cal.tau_drift)
         v_ortho = compute_orthogonality_violation(
-            z, sae.W_dec_A, sae.W_dec_B, cal.tau_ortho
+            z, sae.W_dec_A, sae.W_dec_B, cal.tau_ortho, sae.gamma
         )
 
         return torch.stack([v_faith, v_drift, v_ortho]).abs()
-
-    def _save_checkpoint(
-        self,
-        sae: StratifiedSAE,
-        cal: CalibrationResult,
-        config: SPALFConfig,
-        adrc: ADRCController,
-        capu: ModifiedCAPU,
-        ema: DualRateEMA,
-        optimizer: torch.optim.Optimizer,
-        step: int,
-        phase: int,
-    ) -> None:
-        """Save full training checkpoint using safetensors."""
-        from src.checkpoint import save_checkpoint
-
-        save_checkpoint(sae, cal, config, adrc, capu, ema, optimizer, step, phase)

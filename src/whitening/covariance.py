@@ -1,12 +1,10 @@
 """Welford online mean + covariance estimation with convergence detection."""
 
-from __future__ import annotations
-
 import math
 
 import torch
 
-from src.runtime import DEVICE
+device = torch.device("cuda")
 
 
 class OnlineCovariance:
@@ -17,8 +15,8 @@ class OnlineCovariance:
         self.check_interval = min(math.ceil(d**2), 1_000_000)
 
         self._n = 0
-        self._mean = torch.zeros(d, dtype=torch.float64, device=DEVICE)
-        self._M2 = torch.zeros(d, d, dtype=torch.float64, device=DEVICE)
+        self._mean = torch.zeros(d, dtype=torch.float64, device=device)
+        self._M2 = torch.zeros(d, d, dtype=torch.float64, device=device)
 
         self._snapshot_cov: torch.Tensor | None = None
         self._n_at_snapshot = 0
@@ -40,8 +38,8 @@ class OnlineCovariance:
         new_n = self._n + batch_n
         new_mean = self._mean + delta * (batch_n / new_n)
 
-        batch_centered = x - batch_mean  # [batch, d]
-        batch_M2 = batch_centered.T @ batch_centered  # [d, d]
+        batch_centered = x - batch_mean
+        batch_M2 = batch_centered.T @ batch_centered
         self._M2 += batch_M2 + torch.outer(delta, delta) * (
             self._n * batch_n / new_n
         )

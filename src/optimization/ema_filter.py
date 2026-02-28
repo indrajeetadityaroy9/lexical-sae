@@ -1,11 +1,9 @@
-"""Dual-rate EMA filtering for constraint violation signals (§4.4)."""
-
-from __future__ import annotations
+"""Dual-rate EMA filtering for constraint violation signals."""
 
 import torch
 from torch import Tensor
 
-from src.runtime import DEVICE
+device = torch.device("cuda")
 
 
 class DualRateEMA:
@@ -21,9 +19,8 @@ class DualRateEMA:
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
 
-        self._v_fast_raw = torch.zeros(n_constraints, device=DEVICE)
-        self._v_slow_raw = torch.zeros(n_constraints, device=DEVICE)
-        self._v_fast_prev = torch.zeros(n_constraints, device=DEVICE)
+        self._v_fast_raw = torch.zeros(n_constraints, device=device)
+        self._v_slow_raw = torch.zeros(n_constraints, device=device)
         self._n_updates = 0
 
     def update(self, violations: Tensor) -> None:
@@ -33,18 +30,9 @@ class DualRateEMA:
             violations: [n_constraints] raw per-batch violations (g_i(θ)).
         """
         v = violations.detach()
-
-        # Store bias-corrected current as prev BEFORE updating
-        if self._n_updates > 0:
-            self._v_fast_prev = self.v_fast.clone()
-
         self._n_updates += 1
         self._v_fast_raw = self.beta_fast * self._v_fast_raw + (1 - self.beta_fast) * v
         self._v_slow_raw = self.beta_slow * self._v_slow_raw + (1 - self.beta_slow) * v
-
-        # On first update, set prev to current (no delta)
-        if self._n_updates == 1:
-            self._v_fast_prev = self.v_fast.clone()
 
     @property
     def v_fast(self) -> Tensor:
@@ -60,15 +48,14 @@ class DualRateEMA:
             return self._v_slow_raw
         return self._v_slow_raw / (1 - self.beta_slow ** self._n_updates)
 
-    @property
-    def v_fast_prev(self) -> Tensor:
-        """Previous step's bias-corrected fast EMA [n_constraints]."""
-        return self._v_fast_prev
-
     def state_dict(self) -> dict:
         return {
             "v_fast_raw": self._v_fast_raw,
             "v_slow_raw": self._v_slow_raw,
-            "v_fast_prev": self._v_fast_prev,
-            "n_updates": self._n_updates,
+            "n_updates": torch.tensor(self._n_updates, device=device),
         }
+
+    def load_state_dict(self, sd: dict) -> None:
+        self._v_fast_raw = sd["v_fast_raw"].to(device)
+        self._v_slow_raw = sd["v_slow_raw"].to(device)
+        self._n_updates = int(sd["n_updates"].item())

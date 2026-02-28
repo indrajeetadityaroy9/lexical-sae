@@ -1,12 +1,11 @@
 """SAE patching: run original + SAE-patched forward passes through the transformer."""
 
-from __future__ import annotations
 
 import torch
 from torch import Tensor
 
 from src.data.activation_store import ActivationStore
-from src.model.sae import StratifiedSAE
+from src.sae import StratifiedSAE
 from src.whitening.whitener import SoftZCAWhitener
 
 
@@ -43,7 +42,7 @@ def _patched_forward_tl(
     x_hat_flat, z, gate_mask, _, _ = sae(x_tilde)
     x_hat = x_hat_flat.reshape(B, S, d).to(x_raw.dtype)
 
-    def patch_hook(value, hook):
+    def patch_hook(_value, _hook):
         return x_hat
 
     patched_logits = model.run_with_hooks(
@@ -76,7 +75,7 @@ def _patched_forward_hf(
     layer_idx = store._parse_layer_index()
     target_module = store._resolve_hf_layer(model, layer_idx)
 
-    def inject_hook(module, input, output):
+    def inject_hook(_module, _input, output):
         if isinstance(output, tuple):
             return (x_hat,) + output[1:]
         return x_hat
