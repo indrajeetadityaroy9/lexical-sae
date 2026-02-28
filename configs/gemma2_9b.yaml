@@ -1,0 +1,5 @@
+model_name: "google/gemma-2-9b"
+hook_point: "model.layers.20"
+batch_size: 1024
+V_cap: 50000
+output_dir: "runs/gemma2_9b"

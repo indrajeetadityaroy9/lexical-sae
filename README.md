@@ -1,66 +1,35 @@
-# SPALF
+# SPALF: Spectrally-Preconditioned Augmented Lagrangian on Stratified Feature Manifolds
 
-SPALF trains sparse autoencoders with constrained optimization.
+SPALF trains sparse autoencoders (SAEs) for mechanistic interpretability by formulating sparsity as a constrained optimization problem. Rather than manually weighting reconstruction against sparsity, SPALF minimizes L0 sparsity subject to faithfulness, lexical drift, and orthogonality constraints, solved via an augmented Lagrangian with adaptive dual dynamics.
 
-## Objective
+### Stratified Decoder Architecture
 
-SPALF minimizes discretization-corrected sparsity under three constraints:
-- Faithfulness: whitened reconstruction error
-- Drift: anchored decoder deviation from vocabulary
-- Orthogonality: co-activation-weighted decoder overlap
+The decoder is partitioned into two:
+- **Anchored columns** `W_A ∈ R^{d×V}`: initialized from the model's unembedding matrix and constrained to remain close, providing a lexically grounded basis.
+- **Free columns** `W_B ∈ R^{d×(F-V)}`: learned from scratch with unit-norm projection, capturing residual structure orthogonal to the vocabulary.
 
-Training uses an augmented Lagrangian with dual ascent and monotone penalty updates.
+The encoder is initialized via matched filters: `W_enc[:V] = Σ^{-1} W_vocab` (whitened vocabulary directions), with the free encoder block QR-orthogonalized against the anchored block.
 
-## Install
+### JumpReLU Gating with Moreau Envelope STE
 
-```bash
-pip install -e .
+Gating uses JumpReLU with learnable log-thresholds. The non-differentiable Heaviside step is handled via a Moreau envelope proximal gradient, which provides a linear ramp STE in the transition zone `[-√(2γ_j), 0]` around each threshold. Per-feature bandwidth `γ_j = (c_ε · IQR_j)² / 2` is calibrated from local pre-activation statistics and periodically recalibrated during training.
+
+Both the L0 sparsity objective and the reconstruction loss route gradients to the threshold parameters through the Moreau envelope kernel, implemented as fused Triton kernels. This follows Eq. 11 from [Rajamanoharan et al. (2024)](#references), generalized from the rectangle kernel to the Moreau envelope.
+
+### Augmented Lagrangian Optimization
+
+The constrained problem is solved via an augmented Lagrangian with the AL-CoLe smooth penalty:
+
+```
+L(θ, λ, ρ) = E[||z||_0] + Σ_i ρ_i · Ψ(g_i(θ), λ_i/ρ_i)
 ```
 
-Requirements: Python 3.10+, CUDA, PyTorch 2.4+.
+where `Ψ(g, y) = (max(0, 2g + y)² - y²) / 4` is the C¹-smooth penalty from [Hoeltgen et al. (2025)](#references) that eliminates the non-smooth `max(0, ·)²` transition of the classical augmented Lagrangian.
 
-## Train
+The dual variables `λ` and penalty coefficients `ρ` operate on a slow timescale separated from the primal SGD updates:
 
-```bash
-spalf-train configs/pythia_1b.yaml
-```
+- **Dual update (nuPI controller)**: `λ ← max(λ + ρ·e + κ_p·ρ·(e - e_prev), 0)`, where `e` is the slow-EMA-filtered constraint violation. The proportional term damps oscillations around constraint boundaries. The gain `κ_p = 0.5` is structurally derived from the sampling-to-timescale ratio (not a tunable parameter).
 
-## Evaluate
+- **Penalty update (Monotone CAPU)**: `ρ_i ← max(ρ_i, η_i / √v̄_i)`, a monotone-increasing per-constraint adaptive penalty. The initial scale `η_i` is calibrated from initial violation magnitudes.
 
-```bash
-spalf-eval configs/pythia_1b.yaml
-```
-
-`spalf-eval` requires `checkpoint` in the config.
-
-## Config
-
-Core knobs:
-- `F`: dictionary width (`0` => auto `32*d_model`)
-- `L0_target`: target active features (`null` => auto `ceil(F/400)`)
-- `R2_target`: faithfulness target
-- `lr`: Adam learning rate
-
-Operational fields:
-- `model_name`, `hook_point`, `dataset`, `batch_size`, `seq_len`, `total_tokens`
-- `output_dir`, `checkpoint_interval`, `resume_from_checkpoint`
-- `eval_suites`, `checkpoint`
-
-See `configs/pythia_1b.yaml` and `configs/llama3_8b.yaml`.
-
-## Runtime Logs
-
-All runtime output is structured JSON via `print(json.dumps(...))`.
-
-Typical events:
-- `train_start`, `calibration_start`, `calibration_ready`
-- `train_loop_start`, `train_step`, `kl_onset`, `checkpoint_saved`, `train_loop_complete`
-- `checkpoint_loaded`, `eval_suite_start`, `eval_suite_summary`
-
-## Checkpoints
-
-Each checkpoint directory contains:
-- `model.safetensors` (SAE weights)
-- `optimizer.bin` and Accelerate state files
-- `calibration.safetensors` (whitener + `W_vocab`)
-- `metadata.json` (step + config + calibration metadata)
+- **Constraint filtering (dual-rate EMA)**: Raw per-batch violations are filtered through fast (β ≈ 0.9) and slow (β = 0.99) exponential moving averages with Adam-style bias correction. The fast channel drives penalty adaptation; the slow channel drives dual updates.

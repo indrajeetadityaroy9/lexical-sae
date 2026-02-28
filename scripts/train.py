@@ -5,10 +5,8 @@ import os
 
 import torch
 
-from src.config import SPALFConfig
-from src.training.trainer import SPALFTrainer
-
-assert torch.cuda.is_available(), "SPALF requires CUDA"
+from spalf.config import SPALFConfig
+from spalf.training.trainer import SPALFTrainer
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -17,7 +15,7 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
 torch.backends.cuda.enable_math_sdp(False)
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
 def main() -> None:

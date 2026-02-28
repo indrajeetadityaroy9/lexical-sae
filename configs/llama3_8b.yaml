@@ -1,17 +1,6 @@
 model_name: "meta-llama/Meta-Llama-3-8B"
-hook_point: "blocks.16.hook_resid_post"
-dataset: "monology/pile-uncopyrighted"
-total_tokens: 1_000_000_000
+hook_point: "model.layers.16"
 batch_size: 2048
-seq_len: 128
-R2_target: 0.97
 V_cap: 50000
-lr: 3e-4
-seed: 42
 output_dir: "runs/llama3_8b"
 checkpoint: "runs/llama3_8b/spalf_phase2_final.pt"
-eval_suites:
-  - downstream_loss
-  - sparsity_frontier
-  - drift_fidelity
-  - feature_absorption
