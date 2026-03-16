@@ -151,8 +151,8 @@ def _save_checkpoint(
     step: int,
     onset_step: int,
     lambda_disc: float,
-    D_ema: float,
-    D_0: float,
+    D_ema: Tensor,
+    D_0: Tensor,
 ) -> None:
     """Save training state and calibration artifacts to a checkpoint directory."""
     ckpt_dir = Path(output_dir)
@@ -180,8 +180,8 @@ def _save_checkpoint(
             "tau_ortho": cal["tau_ortho"], "tau_kl": cal["tau_kl"],
         },
         "lambda_disc": lambda_disc,
-        "D_ema": D_ema,
-        "D_0": D_0,
+        "D_ema": D_ema.item(),
+        "D_0": D_0.item(),
     }
     with open(ckpt_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
@@ -305,10 +305,11 @@ def train(config: DictConfig) -> StratifiedSAE:
     sae = initialize_from_calibration(cal, store)
     sae = torch.compile(sae, mode="max-autotune")
 
-    initial_violations, D_0 = _calibrate_initial_violations(
+    initial_violations, D_0_val = _calibrate_initial_violations(
         buffer, whitener, sae, W_vocab, cal, config.batch_size,
     )
-    D_ema = D_0
+    D_0 = torch.tensor(D_0_val, device="cuda")
+    D_ema = D_0.clone()
 
     total_steps = cal["total_steps"]
 
@@ -345,12 +346,14 @@ def train(config: DictConfig) -> StratifiedSAE:
     lambda_disc = 0.0
 
     if config.resume_from_checkpoint:
-        start_step, onset_step, lambda_disc, D_ema, D_0, whitener, W_vocab = (
+        start_step, onset_step, lambda_disc, D_ema_val, D_0_val, whitener, W_vocab = (
             _resume_from_checkpoint(
                 config, sae, optimizer, scheduler, controller,
                 whitener, W_vocab, cal,
             )
         )
+        D_0 = torch.tensor(D_0_val, device="cuda")
+        D_ema = torch.tensor(D_ema_val, device="cuda")
 
     whitener.forward = torch.compile(whitener.forward)
     whitener.compute_mahalanobis_sq = torch.compile(whitener.compute_mahalanobis_sq)
@@ -407,10 +410,9 @@ def train(config: DictConfig) -> StratifiedSAE:
 
         controller.update(violations)
 
-        # MTZF: update transition-zone mass EMA.
-        D_k = disc_penalty.mean().item()
+        # MTZF: update transition-zone mass EMA (GPU-resident, no sync).
         beta = controller._adaptive_beta()
-        D_ema = beta * D_ema + (1.0 - beta) * D_k
+        D_ema.mul_(beta).add_(disc_penalty.mean(), alpha=1.0 - beta)
 
         # ── AL objective + optimization step ──────────────────────
 
@@ -434,8 +436,8 @@ def train(config: DictConfig) -> StratifiedSAE:
         if controller.should_do_slow_update(step):
             controller.step()
 
-            # MTZF: endogenous gamma coupling from transition-zone mass.
-            ratio = min(D_ema / D_0, 1.0)
+            # MTZF: endogenous gamma coupling (single GPU→CPU sync per slow update).
+            ratio = min((D_ema / D_0).item(), 1.0)
 
             if kl_active:
                 lambda_disc = max(1.0 - ratio, lambda_disc)
